@@ -27,11 +27,11 @@ void BLESerial::begin(ReceiveCallback receiveCallback) {
   advertising->setScanResponse(true);
   advertising->start();
 
-  Serial.printf("BLE: advertising name: %s\n", mDeviceName);
+  Serial.printf("BLE: advertising name: %s\n", mDeviceName.c_str());
 }
 
 void BLESerial::send(const String &msg) {
-  Serial.print(msg);
+  Serial.printf("MSG: %s", msg);
 
   if (!mDeviceConnected || !mTxCharacteristic || !mServer) {
     Serial.printf("BLE: Can not send, device is not ready\n");
@@ -92,15 +92,15 @@ void BLESerial::onWrite(BLECharacteristic* characteristic) {
     return;
   }
 
-  const String& str = characteristic->getValue();
-  if (str.length() == 0) {
+  const String& msg = characteristic->getValue();
+  if (msg.length() == 0) {
     Serial.printf("BLE: Empty message received\n");
     return;
   }
 
-  Serial.print(str);
+  Serial.printf("MSG: %s", msg);
 
   if (mReceiveCallback) {
-    mReceiveCallback(str);
+    mReceiveCallback(msg);
   }
 }
