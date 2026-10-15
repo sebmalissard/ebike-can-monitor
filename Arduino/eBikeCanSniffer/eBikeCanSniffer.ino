@@ -132,6 +132,7 @@ void setupCAN() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
   unsigned long t0 = millis();
   while (!Serial && millis() - t0 < 3000);
 
