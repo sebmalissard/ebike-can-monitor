@@ -7,6 +7,7 @@
 
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 
@@ -15,7 +16,6 @@
 
 #include "BLESerial.h"
 #include "CanRingBuffer.h"
-#include "Credentials.h"
 
 // Pinmux XIAO ESP32-C6:
 //  D0: TXD --> WCMCU-230(SN65HVD230): CTX
@@ -27,9 +27,36 @@
 BLESerial ble("eBikeCanSniffer");
 bool wifiOTASetup = false;
 
+static const char* CREDENTIALS_NVS_PARTITION = "fctry";
+static const char* WIFI_NVS_NAMESPACE = "wifi";
+static const char* OTA_NVS_NAMESPACE = "ota";
+
+String loadCredential(const char* nvsNamespace, const char* key) {
+  Preferences prefs;
+  prefs.begin(nvsNamespace, true, CREDENTIALS_NVS_PARTITION);  // read-only
+  String value = prefs.getString(key, "");
+  prefs.end();
+  return value;
+}
+
 void setupWifiOTA() {
+  String ssid = loadCredential(WIFI_NVS_NAMESPACE, "ssid");
+  String password = loadCredential(WIFI_NVS_NAMESPACE, "pass");
+  String otaPassword = loadCredential(OTA_NVS_NAMESPACE, "pass");
+
+  if (ssid.length() == 0) {
+    Serial.println("No Wi-Fi credentials in fctry partition, Wi-Fi OTA disabled.");
+    return;
+  }
+
+  // Never run OTA without a password
+  if (otaPassword.length() == 0) {
+    Serial.println("No OTA password in fctry partition, Wi-Fi OTA disabled.");
+    return;
+  }
+
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(ssid.c_str(), password.c_str());
   
   // Wifi connection (5s timeout)
   Serial.println("Connecting to Wifi:");
@@ -49,7 +76,7 @@ void setupWifiOTA() {
 
   // Arduino OTA
   ArduinoOTA.setHostname("ESP32-eBikeCanSniffer-OTA");
-  ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
+  ArduinoOTA.setPassword(otaPassword.c_str());
 
   ArduinoOTA.onStart([]() {
     Serial.println("OTA: Start");
