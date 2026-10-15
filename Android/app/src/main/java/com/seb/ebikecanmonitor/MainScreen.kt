@@ -35,6 +35,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.withStyle
@@ -67,6 +69,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val state by vm.connectionState.collectAsStateWithLifecycle()
     val status by vm.statusMessage.collectAsStateWithLifecycle()
     val entries by vm.entries.collectAsStateWithLifecycle()
+    val lostFrames by vm.lostFrames.collectAsStateWithLifecycle()
+    val busStatus by vm.busStatus.collectAsStateWithLifecycle()
 
     var autoScroll by remember { mutableStateOf(true) }
     val listState = rememberLazyListState()
@@ -110,7 +114,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 .fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("eBike CAN Monitor", style = MaterialTheme.typography.headlineSmall)
+            Text(stringResource(R.string.app_name), style = MaterialTheme.typography.headlineSmall)
 
             Text(
                 text = status,
@@ -123,14 +127,17 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 Button(
                     onClick = ::onConnectClick,
                     enabled = state == BleState.Disconnected,
-                ) { Text("Connexion") }
+                ) { Text(stringResource(R.string.app_connect)) }
 
                 OutlinedButton(
                     onClick = vm::disconnect,
                     enabled = state != BleState.Disconnected,
-                ) { Text("Déconnexion") }
+                ) { Text(stringResource(R.string.app_disconnect)) }
 
-                TextButton(onClick = vm::clear, enabled = entries.isNotEmpty()) { Text("Effacer") }
+                TextButton(
+                    onClick = vm::clear,
+                    enabled = entries.isNotEmpty()
+                ) { Text(stringResource(R.string.app_clear)) }
             }
 
             Row(
@@ -138,9 +145,32 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("${entries.size} messages", style = MaterialTheme.typography.labelLarge)
+                Column {
+                    Text(
+                        pluralStringResource(R.plurals.messages_count, entries.size, entries.size),
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    if (lostFrames > 0) {
+                        Text(
+                            pluralStringResource(
+                                R.plurals.lost_frames_ble,
+                                lostFrames.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+                                lostFrames,
+                            ),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    busStatus?.takeIf { it.missed > 0 || it.overrun > 0 }?.let {
+                        Text(
+                            stringResource(R.string.twai_status, it.missed, it.overrun),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Défilement auto", style = MaterialTheme.typography.labelLarge)
+                    Text(stringResource(R.string.auto_scroll), style = MaterialTheme.typography.labelLarge)
                     Switch(
                         checked = autoScroll,
                         onCheckedChange = { autoScroll = it },

@@ -11,6 +11,7 @@
 #include <WiFiUdp.h>
 
 #include <driver/twai.h>
+#include <esp_timer.h>
 
 #include "BLESerial.h"
 #include "Credentials.h"
@@ -112,24 +113,76 @@ void setup() {
   setupCAN();
 }
 
+// ---------------------------------------------------------------------------
+// BLE text protocol (one line per message, terminated by '\n')
+//
+//   CAN frame: seq,ts_us,id,flags,dlc,data
+//     seq    uint32 counter incremented for every frame read from the TWAI
+//            (before the BLE send): a gap means lost frames
+//     ts_us  esp_timer_get_time() taken right after the TWAI read (µs since boot)
+//     id     identifier in uppercase hex (3 digits if standard, 8 if extended)
+//     flags  S (standard) or E (extended), followed by R for RTR frames
+//     dlc    data_length_code (decimal)
+//     data   data bytes as concatenated uppercase hex, empty for an RTR frame
+//     e.g.: 42,12345678,1A2,E,8,01FF00AA11223344
+//
+//   TWAI status: #STATUS,missed=N,overrun=N  (cumulative driver counters,
+//     sent every STATUS_PERIOD_MS)
+// ---------------------------------------------------------------------------
+
+static const unsigned long STATUS_PERIOD_MS = 5000;
+
+static uint32_t canSeq = 0;
+static unsigned long lastStatusMs = 0;
+
+void sendCanFrame(const twai_message_t& m, uint32_t seq, int64_t tsUs) {
+  char line[96];
+  int n = snprintf(line, sizeof(line), "%lu,%llu,", (unsigned long)seq, (unsigned long long)tsUs);
+
+  if (m.extd) {
+    n += snprintf(line + n, sizeof(line) - n, "%08lX,E", (unsigned long)m.identifier);
+  } else {
+    n += snprintf(line + n, sizeof(line) - n, "%03lX,S", (unsigned long)m.identifier);
+  }
+  if (m.rtr) {
+    n += snprintf(line + n, sizeof(line) - n, "R");
+  }
+
+  n += snprintf(line + n, sizeof(line) - n, ",%u,", (unsigned)m.data_length_code);
+
+  if (!m.rtr) {
+    uint8_t len = m.data_length_code > TWAI_FRAME_MAX_DLC ? TWAI_FRAME_MAX_DLC : m.data_length_code;
+    for (uint8_t i = 0; i < len; i++) {
+      n += snprintf(line + n, sizeof(line) - n, "%02X", m.data[i]);
+    }
+  }
+
+  n += snprintf(line + n, sizeof(line) - n, "\n");
+  ble.send(line, n);
+}
+
+void sendStatus() {
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK) return;
+
+  char line[64];
+  int n = snprintf(line, sizeof(line), "#STATUS,missed=%lu,overrun=%lu\n",
+                   (unsigned long)st.rx_missed_count, (unsigned long)st.rx_overrun_count);
+  ble.send(line, n);
+}
+
 void loop() {
   twai_message_t rxMsg;
 
   if (twai_receive(&rxMsg, pdMS_TO_TICKS(100)) == ESP_OK) {
-    String line = "ID: 0x" + String(rxMsg.identifier, HEX);
+    int64_t tsUs = esp_timer_get_time();
+    sendCanFrame(rxMsg, canSeq++, tsUs);
+  }
 
-    if (rxMsg.extd) line += " (extended)";
-    if (rxMsg.rtr)  line += " (RTR)";
-
-    line += "  DLC: " + String(rxMsg.data_length_code) + "  Data: ";
-
-    for (int i = 0; i < rxMsg.data_length_code; i++) {
-      if (rxMsg.data[i] < 0x10) line += "0";
-      line += String(rxMsg.data[i], HEX) + " ";
-    }
-    line += "\n";
-
-    ble.send(line);
+  unsigned long now = millis();
+  if (now - lastStatusMs >= STATUS_PERIOD_MS) {
+    lastStatusMs = now;
+    sendStatus();
   }
 
   if (wifiOTASetup) {

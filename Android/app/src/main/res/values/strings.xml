@@ -1,4 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">eBike CAN Monitor</string>
+
+    <string name="app_connect">Connect</string>
+    <string name="app_disconnect">Disconnect</string>
+    <string name="app_clear">Clear</string>
+
+    <string name="auto_scroll">Auto-scroll</string>
+
+    <plurals name="messages_count">
+        <item quantity="one">%d message</item>
+        <item quantity="other">%d messages</item>
+    </plurals>
+    <plurals name="lost_frames_ble">
+        <item quantity="one">%d lost frame (BLE)</item>
+        <item quantity="other">%d lost frames (BLE)</item>
+    </plurals>
+    <string name="twai_status">TWAI: %1$d missed, %2$d overrun</string>
+
+    <!-- BLE connection status -->
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_disconnecting">Disconnecting…</string>
+    <string name="status_bluetooth_off">Bluetooth is turned off</string>
+    <string name="status_scanner_unavailable">BLE scanner unavailable</string>
+    <string name="status_scanning">Searching for %1$s…</string>
+    <string name="status_not_found">%1$s not found</string>
+    <string name="status_connecting">Connecting to %1$s…</string>
+    <string name="status_connect_timeout">Connection timed out</string>
+    <string name="status_scan_failed">Scan failed (code %1$d)</string>
+    <string name="status_negotiating_mtu">Negotiating MTU…</string>
+    <string name="status_discovering_services">Discovering services…</string>
+    <string name="status_uart_not_found">UART service not found on the device</string>
+    <string name="status_connected">Connected to %1$s</string>
+    <string name="status_disconnected_by_esp32">Disconnected by the ESP32</string>
+    <string name="status_connection_lost">Connection lost (code %1$d)</string>
+    <string name="status_notifications_failed">Failed to enable notifications (%1$d)</string>
+    <string name="status_permission_denied">Bluetooth permission denied</string>
 </resources>

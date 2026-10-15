@@ -17,6 +17,10 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
+import androidx.annotation.StringRes
+import com.seb.ebikecanmonitor.R
+import com.seb.ebikecanmonitor.can.CanMessage
+import com.seb.ebikecanmonitor.can.CanProtocol
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,8 +30,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 enum class BleState { Disconnected, Scanning, Connecting, Connected }
 
-/** Une ligne complète reçue de l'ESP32, horodatée à la réception. */
-data class LogEntry(val id: Long, val timestampMs: Long, val text: String)
+/** Une ligne complète reçue de l'ESP32, horodatée à la réception, avec son décodage. */
+data class LogEntry(val id: Long, val timestampMs: Long, val text: String, val message: CanMessage)
 
 /**
  * Client BLE pour le firmware eBikeCanSniffer (Nordic UART Service).
@@ -55,8 +59,10 @@ class BleClient(context: Context) {
     private val _state = MutableStateFlow(BleState.Disconnected)
     val state: StateFlow<BleState> = _state.asStateFlow()
 
-    private val _status = MutableStateFlow("Déconnecté")
+    private val _status = MutableStateFlow(appContext.getString(R.string.status_disconnected))
     val status: StateFlow<String> = _status.asStateFlow()
+
+    private fun str(@StringRes id: Int, vararg args: Any): String = appContext.getString(id, *args)
 
     /** Flux des lignes reçues (consommé par le ViewModel). */
     val lines = Channel<LogEntry>(Channel.UNLIMITED)
@@ -80,12 +86,12 @@ class BleClient(context: Context) {
 
         val adapter = appContext.getSystemService(BluetoothManager::class.java)?.adapter
         if (adapter == null || !adapter.isEnabled) {
-            _status.value = "Bluetooth désactivé"
+            _status.value = str(R.string.status_bluetooth_off)
             return
         }
         val leScanner = adapter.bluetoothLeScanner
         if (leScanner == null) {
-            _status.value = "Scanner BLE indisponible"
+            _status.value = str(R.string.status_scanner_unavailable)
             return
         }
 
@@ -98,7 +104,7 @@ class BleClient(context: Context) {
         scanner = leScanner
         scanning = true
         _state.value = BleState.Scanning
-        _status.value = "Recherche de $DEVICE_NAME…"
+        _status.value = str(R.string.status_scanning, DEVICE_NAME)
         leScanner.startScan(listOf(filter), settings, scanCallback)
         mainHandler.postDelayed(scanTimeout, SCAN_TIMEOUT_MS)
     }
@@ -110,14 +116,14 @@ class BleClient(context: Context) {
             BleState.Scanning -> {
                 stopScan()
                 _state.value = BleState.Disconnected
-                _status.value = "Déconnecté"
+                _status.value = str(R.string.status_disconnected)
             }
             else -> {
                 val g = gatt
                 if (g == null) {
-                    forceCleanup("Déconnecté")
+                    forceCleanup(str(R.string.status_disconnected))
                 } else {
-                    _status.value = "Déconnexion…"
+                    _status.value = str(R.string.status_disconnecting)
                     g.disconnect()
                     mainHandler.postDelayed(forceClose, DISCONNECT_TIMEOUT_MS)
                 }
@@ -143,18 +149,18 @@ class BleClient(context: Context) {
         if (scanning) {
             stopScan()
             _state.value = BleState.Disconnected
-            _status.value = "$DEVICE_NAME introuvable"
+            _status.value = str(R.string.status_not_found, DEVICE_NAME)
         }
     }
 
     private val connectTimeout = Runnable {
         if (_state.value == BleState.Connecting) {
-            forceCleanup("Délai de connexion dépassé")
+            forceCleanup(str(R.string.status_connect_timeout))
         }
     }
 
     private val forceClose = Runnable {
-        if (gatt != null) forceCleanup("Déconnecté")
+        if (gatt != null) forceCleanup(str(R.string.status_disconnected))
     }
 
     private fun forceCleanup(message: String) {
@@ -188,7 +194,7 @@ class BleClient(context: Context) {
             stopScan()
             val device: BluetoothDevice = result.device
             _state.value = BleState.Connecting
-            _status.value = "Connexion à ${device.name ?: device.address}…"
+            _status.value = str(R.string.status_connecting, device.name ?: device.address)
             gatt = device.connectGatt(appContext, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
             mainHandler.postDelayed(connectTimeout, CONNECT_TIMEOUT_MS)
         }
@@ -196,7 +202,7 @@ class BleClient(context: Context) {
         override fun onScanFailed(errorCode: Int) {
             stopScan()
             _state.value = BleState.Disconnected
-            _status.value = "Échec du scan (code $errorCode)"
+            _status.value = str(R.string.status_scan_failed, errorCode)
         }
     }
 
@@ -206,7 +212,7 @@ class BleClient(context: Context) {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                _status.value = "Négociation MTU…"
+                _status.value = str(R.string.status_negotiating_mtu)
                 if (!g.requestMtu(REQUESTED_MTU)) g.discoverServices()
             } else {
                 // Déconnexion (volontaire, perte de lien, ou échec de connexion)
@@ -216,15 +222,15 @@ class BleClient(context: Context) {
                 if (gatt === g) gatt = null
                 _state.value = BleState.Disconnected
                 _status.value = when {
-                    userRequestedDisconnect -> "Déconnecté"
-                    status == BluetoothGatt.GATT_SUCCESS -> "Déconnecté par l'ESP32"
-                    else -> "Connexion perdue (code $status)"
+                    userRequestedDisconnect -> str(R.string.status_disconnected)
+                    status == BluetoothGatt.GATT_SUCCESS -> str(R.string.status_disconnected_by_esp32)
+                    else -> str(R.string.status_connection_lost, status)
                 }
             }
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
-            _status.value = "Découverte des services…"
+            _status.value = str(R.string.status_discovering_services)
             g.discoverServices()
         }
 
@@ -232,7 +238,7 @@ class BleClient(context: Context) {
             val tx = g.getService(NUS_SERVICE)?.getCharacteristic(NUS_TX)
             val cccd = tx?.getDescriptor(CCCD)
             if (status != BluetoothGatt.GATT_SUCCESS || tx == null || cccd == null) {
-                _status.value = "Service UART introuvable sur l'appareil"
+                _status.value = str(R.string.status_uart_not_found)
                 userRequestedDisconnect = true
                 g.disconnect()
                 return
@@ -246,9 +252,9 @@ class BleClient(context: Context) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 mainHandler.removeCallbacks(connectTimeout)
                 _state.value = BleState.Connected
-                _status.value = "Connecté à $DEVICE_NAME"
+                _status.value = str(R.string.status_connected, DEVICE_NAME)
             } else {
-                _status.value = "Activation des notifications échouée ($status)"
+                _status.value = str(R.string.status_notifications_failed, status)
                 userRequestedDisconnect = true
                 g.disconnect()
             }
@@ -282,7 +288,7 @@ class BleClient(context: Context) {
         val now = System.currentTimeMillis()
         for (line in completed) {
             if (line.isNotBlank()) {
-                lines.trySend(LogEntry(idGenerator.incrementAndGet(), now, line))
+                lines.trySend(LogEntry(idGenerator.incrementAndGet(), now, line, CanProtocol.parse(line)))
             }
         }
     }

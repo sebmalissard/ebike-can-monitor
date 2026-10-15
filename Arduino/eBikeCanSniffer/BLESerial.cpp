@@ -31,10 +31,13 @@ void BLESerial::begin(ReceiveCallback receiveCallback) {
 }
 
 void BLESerial::send(const String &msg) {
-  Serial.printf("MSG: %s", msg);
+  send(msg.c_str(), msg.length());
+}
 
+void BLESerial::send(const char* data, size_t len) {
+  // No Serial.printf here: send() is called for every CAN frame and serial
+  // output at 115200 baud would block the loop (lost frames).
   if (!mDeviceConnected || !mTxCharacteristic || !mServer) {
-    Serial.printf("BLE: Can not send, device is not ready\n");
     return;
   }
 
@@ -53,12 +56,11 @@ void BLESerial::send(const String &msg) {
   }
 
   // Message
-  size_t len = msg.length();
   size_t offset = 0;
 
   while (offset < len) {
     size_t n = min(chunkSize, len - offset);
-    mTxCharacteristic->setValue((uint8_t*)(msg.c_str() + offset), n);
+    mTxCharacteristic->setValue((uint8_t*)(data + offset), n);
     mTxCharacteristic->notify();
     offset += n;
     if (offset < len) {

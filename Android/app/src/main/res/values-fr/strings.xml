@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">eBike CAN Monitor</string>
+
+    <string name="app_connect">Connecter</string>
+    <string name="app_disconnect">Déconnecter</string>
+    <string name="app_clear">Effacer</string>
+
+    <string name="auto_scroll">Défilement auto</string>
+
+    <plurals name="messages_count">
+        <item quantity="one">%d message</item>
+        <item quantity="many">%d messages</item>
+        <item quantity="other">%d messages</item>
+    </plurals>
+    <plurals name="lost_frames_ble">
+        <item quantity="one">%d trame perdue (BLE)</item>
+        <item quantity="many">%d trames perdues (BLE)</item>
+        <item quantity="other">%d trames perdues (BLE)</item>
+    </plurals>
+    <string name="twai_status">TWAI : %1$d manquées, %2$d overrun</string>
+
+    <!-- État de la connexion BLE -->
+    <string name="status_disconnected">Déconnecté</string>
+    <string name="status_disconnecting">Déconnexion…</string>
+    <string name="status_bluetooth_off">Bluetooth désactivé</string>
+    <string name="status_scanner_unavailable">Scanner BLE indisponible</string>
+    <string name="status_scanning">Recherche de %1$s…</string>
+    <string name="status_not_found">%1$s introuvable</string>
+    <string name="status_connecting">Connexion à %1$s…</string>
+    <string name="status_connect_timeout">Délai de connexion dépassé</string>
+    <string name="status_scan_failed">Échec du scan (code %1$d)</string>
+    <string name="status_negotiating_mtu">Négociation MTU…</string>
+    <string name="status_discovering_services">Découverte des services…</string>
+    <string name="status_uart_not_found">Service UART introuvable sur l\'appareil</string>
+    <string name="status_connected">Connecté à %1$s</string>
+    <string name="status_disconnected_by_esp32">Déconnecté par l\'ESP32</string>
+    <string name="status_connection_lost">Connexion perdue (code %1$d)</string>
+    <string name="status_notifications_failed">Activation des notifications échouée (%1$d)</string>
+    <string name="status_permission_denied">Permission Bluetooth refusée</string>
+</resources>

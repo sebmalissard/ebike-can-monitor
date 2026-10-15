@@ -18,6 +18,7 @@ public:
 
   void begin(ReceiveCallback receiveCallback = nullptr); 
   void send(const String &msg);
+  void send(const char* data, size_t len);
 
   bool isConnected() const { return mDeviceConnected; }
 

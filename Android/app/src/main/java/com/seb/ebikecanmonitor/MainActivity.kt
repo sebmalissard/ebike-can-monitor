@@ -12,8 +12,8 @@ import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge() // Obligatoire de fait sur Android 15+/16
 
         setContent {
             val context = LocalContext.current
