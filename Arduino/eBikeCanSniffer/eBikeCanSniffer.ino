@@ -41,6 +41,7 @@ void setupWifiOTA() {
   }
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("\nWifi connection fail, abort Wifi OTA setup");
+    return;
   }
   Serial.println("\nWi-Fi connected.");
   Serial.print("IP address: ");
@@ -51,7 +52,7 @@ void setupWifiOTA() {
   ArduinoOTA.setPassword(ARDUINO_OTA_PASSWORD);
 
   ArduinoOTA.onStart([]() {
-    Serial.println("OA: Start");
+    Serial.println("OTA: Start");
   });
   
   ArduinoOTA.onEnd([]() {
@@ -86,20 +87,20 @@ void setupCAN() {
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-    Serial.println("Driver TWAI installe avec succes");
+    Serial.println("TWAI driver installed successfully");
   } else {
-    Serial.println("Erreur d'installation du driver TWAI");
+    Serial.println("TWAI driver installation failed");
     while (1) delay(1000);
   }
 
   if (twai_start() == ESP_OK) {
-    Serial.println("TWAI demarre avec succes");
+    Serial.println("TWAI started successfully");
   } else {
-    Serial.println("Erreur au demarrage du TWAI");
+    Serial.println("TWAI start failed");
     while (1) delay(1000);
   }
 
-  Serial.println("En attente de messages CAN...");
+  Serial.println("Waiting for CAN messages...");
 }
 
 void setup() {

@@ -100,7 +100,7 @@ void BLESerial::onWrite(BLECharacteristic* characteristic) {
     return;
   }
 
-  Serial.printf("MSG: %s", msg);
+  Serial.printf("MSG: %s", msg.c_str());
 
   if (mReceiveCallback) {
     mReceiveCallback(msg);
