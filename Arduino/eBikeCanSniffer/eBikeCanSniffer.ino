@@ -14,6 +14,7 @@
 #include <esp_timer.h>
 
 #include "BLESerial.h"
+#include "CanRingBuffer.h"
 #include "Credentials.h"
 
 // Pinmux XIAO ESP32-C6:
@@ -118,8 +119,9 @@ void setup() {
 //
 //   CAN frame: seq,ts_us,id,flags,dlc,data
 //     seq    uint32 counter incremented for every frame read from the TWAI
-//            (before the BLE send): a gap means lost frames
-//     ts_us  esp_timer_get_time() taken right after the TWAI read (µs since boot)
+//            (before buffering and the BLE send): a gap means lost frames
+//     ts_us  esp_timer_get_time() taken right after the TWAI read (µs since boot),
+//            kept as is while the frame waits in the ring buffer
 //     id     identifier in uppercase hex (3 digits if standard, 8 if extended)
 //     flags  S (standard) or E (extended), followed by R for RTR frames
 //     dlc    data_length_code (decimal)
@@ -132,33 +134,81 @@ void setup() {
 
 static const unsigned long STATUS_PERIOD_MS = 5000;
 
+// CAN frames wait here until they can be sent over BLE: the BLE client usually
+// connects after the first CAN frames have been received. When the buffer is
+// full, the oldest frames are overwritten.
+// Memory: RING_CAPACITY * sizeof(CanRecord) = 2048 * 32 bytes = 64 KB.
+static const size_t RING_CAPACITY = 2048;
+static CanRingBuffer<RING_CAPACITY> canRing;
+
+// Max payload of one BLE send (largest MTU is 247 => 240 bytes of payload).
+static const size_t BLE_BATCH_SIZE = 240;
+// Upper bound for one formatted frame line (seq 10 + ts 20 + id 8 + flags 2 +
+// dlc 1 + data 16 + 5 commas + '\n' = 63).
+static const size_t MAX_LINE_SIZE = 64;
+// Limit work done per loop() iteration so new frames keep being read.
+static const int MAX_BATCHES_PER_LOOP = 4;
+
 static uint32_t canSeq = 0;
 static unsigned long lastStatusMs = 0;
 
-void sendCanFrame(const twai_message_t& m, uint32_t seq, int64_t tsUs) {
-  char line[96];
-  int n = snprintf(line, sizeof(line), "%lu,%llu,", (unsigned long)seq, (unsigned long long)tsUs);
-
-  if (m.extd) {
-    n += snprintf(line + n, sizeof(line) - n, "%08lX,E", (unsigned long)m.identifier);
-  } else {
-    n += snprintf(line + n, sizeof(line) - n, "%03lX,S", (unsigned long)m.identifier);
-  }
-  if (m.rtr) {
-    n += snprintf(line + n, sizeof(line) - n, "R");
-  }
-
-  n += snprintf(line + n, sizeof(line) - n, ",%u,", (unsigned)m.data_length_code);
-
+CanRecord makeCanRecord(const twai_message_t& m, uint32_t seq, int64_t tsUs) {
+  CanRecord rec = {};
+  rec.tsUs = tsUs;
+  rec.seq = seq;
+  rec.id = m.identifier;
+  rec.flags = (m.extd ? CAN_RECORD_FLAG_EXT : 0) | (m.rtr ? CAN_RECORD_FLAG_RTR : 0);
+  rec.dlc = m.data_length_code;
   if (!m.rtr) {
     uint8_t len = m.data_length_code > TWAI_FRAME_MAX_DLC ? TWAI_FRAME_MAX_DLC : m.data_length_code;
+    memcpy(rec.data, m.data, len);
+  }
+  return rec;
+}
+
+// Format one record as a protocol line. Returns the number of bytes written.
+size_t formatCanRecord(char* out, size_t size, const CanRecord& r) {
+  const bool ext = r.flags & CAN_RECORD_FLAG_EXT;
+  const bool rtr = r.flags & CAN_RECORD_FLAG_RTR;
+
+  size_t n = snprintf(out, size, "%lu,%llu,", (unsigned long)r.seq, (unsigned long long)r.tsUs);
+
+  if (ext) {
+    n += snprintf(out + n, size - n, "%08lX,E", (unsigned long)r.id);
+  } else {
+    n += snprintf(out + n, size - n, "%03lX,S", (unsigned long)r.id);
+  }
+  if (rtr) {
+    n += snprintf(out + n, size - n, "R");
+  }
+
+  n += snprintf(out + n, size - n, ",%u,", (unsigned)r.dlc);
+
+  if (!rtr) {
+    uint8_t len = r.dlc > TWAI_FRAME_MAX_DLC ? TWAI_FRAME_MAX_DLC : r.dlc;
     for (uint8_t i = 0; i < len; i++) {
-      n += snprintf(line + n, sizeof(line) - n, "%02X", m.data[i]);
+      n += snprintf(out + n, size - n, "%02X", r.data[i]);
     }
   }
 
-  n += snprintf(line + n, sizeof(line) - n, "\n");
-  ble.send(line, n);
+  n += snprintf(out + n, size - n, "\n");
+  return n;
+}
+
+// Send buffered frames over BLE, several lines per notification.
+void drainCanRing() {
+  char batch[BLE_BATCH_SIZE];
+  CanRecord rec;
+
+  for (int i = 0; i < MAX_BATCHES_PER_LOOP && ble.isConnected(); i++) {
+    size_t len = 0;
+    while (len + MAX_LINE_SIZE <= sizeof(batch) && canRing.peek(rec)) {
+      len += formatCanRecord(batch + len, sizeof(batch) - len, rec);
+      canRing.pop();
+    }
+    if (len == 0) break;
+    ble.send(batch, len);
+  }
 }
 
 void sendStatus() {
@@ -172,12 +222,17 @@ void sendStatus() {
 }
 
 void loop() {
-  twai_message_t rxMsg;
+  // Do not wait for new frames while buffered frames are waiting to be sent
+  const bool backlog = ble.isConnected() && !canRing.empty();
+  const TickType_t timeout = backlog ? 0 : pdMS_TO_TICKS(100);
 
-  if (twai_receive(&rxMsg, pdMS_TO_TICKS(100)) == ESP_OK) {
+  twai_message_t rxMsg;
+  if (twai_receive(&rxMsg, timeout) == ESP_OK) {
     int64_t tsUs = esp_timer_get_time();
-    sendCanFrame(rxMsg, canSeq++, tsUs);
+    canRing.push(makeCanRecord(rxMsg, canSeq++, tsUs));
   }
+
+  drainCanRing();
 
   unsigned long now = millis();
   if (now - lastStatusMs >= STATUS_PERIOD_MS) {
