@@ -22,6 +22,11 @@ public:
 
   bool isConnected() const { return mDeviceConnected; }
 
+  // True once the client is connected AND has enabled notifications on the TX
+  // characteristic (CCCD written). Notifications sent before that are lost, so
+  // data must only be sent (and removed from any buffer) when this is true.
+  bool isReady() const { return mDeviceConnected && mNotifyEnabled; }
+
 private:
   static constexpr const char* SERVICE_UUID           = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
   static constexpr const char* CHARACTERISTIC_UUID_TX = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E";
@@ -33,6 +38,7 @@ private:
 
   // BLECharacteristicCallbacks
   void onWrite(BLECharacteristic* characteristic) override;
+  void onSubscribe(BLECharacteristic* characteristic, ble_gap_conn_desc* desc, uint16_t subValue) override;
 
   const String        mDeviceName;
   const uint16_t      mDesiredMtu;
@@ -43,4 +49,5 @@ private:
   BLECharacteristic*  mRxCharacteristic{nullptr};
 
   std::atomic<bool>   mDeviceConnected{false};
+  std::atomic<bool>   mNotifyEnabled{false};
 };

@@ -229,7 +229,7 @@ void drainCanRing() {
   char batch[BLE_BATCH_SIZE];
   CanRecord rec;
 
-  for (int i = 0; i < MAX_BATCHES_PER_LOOP && ble.isConnected(); i++) {
+  for (int i = 0; i < MAX_BATCHES_PER_LOOP && ble.isReady(); i++) {
     size_t len = 0;
     while (len + MAX_LINE_SIZE <= sizeof(batch) && canRing.peek(rec)) {
       len += formatCanRecord(batch + len, sizeof(batch) - len, rec);
@@ -252,7 +252,8 @@ void sendStatus() {
 
 void loop() {
   // Do not wait for new frames while buffered frames are waiting to be sent
-  const bool backlog = ble.isConnected() && !canRing.empty();
+  // (isReady(): client connected and notifications enabled)
+  const bool backlog = ble.isReady() && !canRing.empty();
   const TickType_t timeout = backlog ? 0 : pdMS_TO_TICKS(100);
 
   twai_message_t rxMsg;

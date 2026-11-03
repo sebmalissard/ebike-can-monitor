@@ -16,6 +16,7 @@ void BLESerial::begin(ReceiveCallback receiveCallback) {
 
   mTxCharacteristic = service->createCharacteristic(CHARACTERISTIC_UUID_TX, BLECharacteristic::PROPERTY_NOTIFY);
   mTxCharacteristic->addDescriptor(new BLE2902());
+  mTxCharacteristic->setCallbacks(this);  // onSubscribe: client enabled/disabled notifications
 
   mRxCharacteristic = service->createCharacteristic(CHARACTERISTIC_UUID_RX, BLECharacteristic::PROPERTY_WRITE);
   mRxCharacteristic->setCallbacks(this);
@@ -37,7 +38,7 @@ void BLESerial::send(const String &msg) {
 void BLESerial::send(const char* data, size_t len) {
   // No Serial.printf here: send() is called for every CAN frame and serial
   // output at 115200 baud would block the loop (lost frames).
-  if (!mDeviceConnected || !mTxCharacteristic || !mServer) {
+  if (!mDeviceConnected || !mNotifyEnabled || !mTxCharacteristic || !mServer) {
     return;
   }
 
@@ -83,9 +84,20 @@ void BLESerial::onConnect(BLEServer* server) {
 
 void BLESerial::onDisconnect(BLEServer* server) {
   mDeviceConnected = false;
+  mNotifyEnabled = false;
 
   Serial.printf("BLE: client disconnected. Restarting advertising...\n");
   server->getAdvertising()->start();
+}
+
+void BLESerial::onSubscribe(BLECharacteristic* characteristic, ble_gap_conn_desc* desc, uint16_t subValue) {
+  if (characteristic != mTxCharacteristic) {
+    return;
+  }
+
+  // subValue is the CCCD value: bit 0 = notifications, bit 1 = indications
+  mNotifyEnabled = (subValue & 0x0001) != 0;
+  Serial.printf("BLE: notifications %s\n", mNotifyEnabled ? "enabled" : "disabled");
 }
 
 void BLESerial::onWrite(BLECharacteristic* characteristic) {
