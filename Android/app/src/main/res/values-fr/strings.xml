@@ -7,6 +7,7 @@
     <string name="app_clear">Effacer</string>
 
     <string name="auto_scroll">Défilement auto</string>
+    <string name="auto_connect">Connexion automatique</string>
 
     <plurals name="messages_count">
         <item quantity="one">%d message</item>
@@ -38,4 +39,8 @@
     <string name="status_connection_lost">Connexion perdue (code %1$d)</string>
     <string name="status_notifications_failed">Activation des notifications échouée (%1$d)</string>
     <string name="status_permission_denied">Permission Bluetooth refusée</string>
+    <string name="status_association_failed">Échec de l\'association : %1$s</string>
+
+    <!-- Service au premier plan -->
+    <string name="notification_channel">Connexion active</string>
 </resources>

@@ -26,12 +26,23 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 enum class BleState { Disconnected, Scanning, Connecting, Connected }
 
 /** Une ligne complète reçue de l'ESP32, horodatée à la réception, avec son décodage. */
 data class LogEntry(val id: Long, val timestampMs: Long, val text: String, val message: CanMessage)
+
+/**
+ * Ordered events produced by [BleClient]. Session boundaries travel in the same queue as the
+ * lines, so a consumer always sees every line inside the session it belongs to.
+ */
+sealed interface BleEvent {
+    data class Line(val entry: LogEntry) : BleEvent
+    data class SessionStart(val timeMs: Long) : BleEvent
+    data object SessionEnd : BleEvent
+}
 
 /**
  * Client BLE pour le firmware eBikeCanSniffer (Nordic UART Service).
@@ -64,8 +75,11 @@ class BleClient(context: Context) {
 
     private fun str(@StringRes id: Int, vararg args: Any): String = appContext.getString(id, *args)
 
-    /** Flux des lignes reçues (consommé par le ViewModel). */
-    val lines = Channel<LogEntry>(Channel.UNLIMITED)
+    /** Ordered stream of received lines and session boundaries (consumed by the ViewModel). */
+    val events = Channel<BleEvent>(Channel.UNLIMITED)
+
+    /** True between [BleEvent.SessionStart] and [BleEvent.SessionEnd]. */
+    private val sessionActive = AtomicBoolean(false)
 
     private val idGenerator = AtomicLong()
     private val lineBuffer = StringBuilder()
@@ -140,7 +154,8 @@ class BleClient(context: Context) {
         }
         gatt = null
         _state.value = BleState.Disconnected
-        lines.close()
+        endSession()
+        events.close()
     }
 
     // ------------------------------------------------------------- Timeouts
@@ -164,6 +179,11 @@ class BleClient(context: Context) {
     }
 
     private fun forceCleanup(message: String) {
+        closeGatt(message)
+        endSession()
+    }
+
+    private fun closeGatt(message: String) {
         mainHandler.removeCallbacks(connectTimeout)
         mainHandler.removeCallbacks(forceClose)
         gatt?.let {
@@ -219,6 +239,7 @@ class BleClient(context: Context) {
                 mainHandler.removeCallbacks(connectTimeout)
                 mainHandler.removeCallbacks(forceClose)
                 g.close()
+                endSession()
                 if (gatt === g) gatt = null
                 _state.value = BleState.Disconnected
                 _status.value = when {
@@ -251,6 +272,7 @@ class BleClient(context: Context) {
             if (descriptor.uuid != CCCD) return
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 mainHandler.removeCallbacks(connectTimeout)
+                startSession()
                 _state.value = BleState.Connected
                 _status.value = str(R.string.status_connected, DEVICE_NAME)
             } else {
@@ -266,6 +288,22 @@ class BleClient(context: Context) {
             value: ByteArray,
         ) {
             if (characteristic.uuid == NUS_TX) handleChunk(value)
+        }
+    }
+
+    // ---------------------------------------------------------------- Sessions
+
+    /** Queues [BleEvent.SessionStart] before any line of the new connection. */
+    private fun startSession() {
+        if (sessionActive.compareAndSet(false, true)) {
+            events.trySend(BleEvent.SessionStart(System.currentTimeMillis()))
+        }
+    }
+
+    /** Queues [BleEvent.SessionEnd] after every line already received on this connection. */
+    private fun endSession() {
+        if (sessionActive.compareAndSet(true, false)) {
+            events.trySend(BleEvent.SessionEnd)
         }
     }
 
@@ -288,7 +326,7 @@ class BleClient(context: Context) {
         val now = System.currentTimeMillis()
         for (line in completed) {
             if (line.isNotBlank()) {
-                lines.trySend(LogEntry(idGenerator.incrementAndGet(), now, line, CanProtocol.parse(line)))
+                events.trySend(BleEvent.Line(LogEntry(idGenerator.incrementAndGet(), now, line, CanProtocol.parse(line))))
             }
         }
     }

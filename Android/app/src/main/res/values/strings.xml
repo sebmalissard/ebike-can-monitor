@@ -7,6 +7,7 @@
     <string name="app_clear">Clear</string>
 
     <string name="auto_scroll">Auto-scroll</string>
+    <string name="auto_connect">Auto-connect</string>
 
     <plurals name="messages_count">
         <item quantity="one">%d message</item>
@@ -36,4 +37,26 @@
     <string name="status_connection_lost">Connection lost (code %1$d)</string>
     <string name="status_notifications_failed">Failed to enable notifications (%1$d)</string>
     <string name="status_permission_denied">Bluetooth permission denied</string>
+    <string name="status_association_failed">Pairing failed: %1$s</string>
+
+    <!-- Foreground service -->
+    <string name="notification_channel">Active connection</string>
+
+    <!-- Session recording -->
+    <string name="recording_to">Recording: %1$s (%2$d rows)</string>
+    <string name="recording_failed">Recording failed: %1$s</string>
+
+    <!-- Saved sessions -->
+    <string name="app_recordings">Recordings</string>
+    <string name="recordings_title">Saved sessions</string>
+    <string name="recordings_empty">No saved session yet. A file is created each time you connect.</string>
+    <string name="recordings_hint">Folder: %1$s. Tap a file to open it.</string>
+    <string name="close">Close</string>
+    <string name="app_share">Share</string>
+    <string name="viewer_live">Live: following the session being recorded</string>
+    <string name="viewer_truncated">Showing the last %1$d lines</string>
+    <plurals name="lines_count">
+        <item quantity="one">%d line</item>
+        <item quantity="other">%d lines</item>
+    </plurals>
 </resources>
