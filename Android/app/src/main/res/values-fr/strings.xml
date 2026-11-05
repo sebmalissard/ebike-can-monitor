@@ -43,4 +43,17 @@
 
     <!-- Service au premier plan -->
     <string name="notification_channel">Connexion active</string>
+
+    <!-- Export vers le serveur Samba -->
+    <string name="export_button">Exporter vers le NAS</string>
+    <string name="export_title">Export vers le serveur Samba</string>
+    <string name="export_target">Destination : %1$s</string>
+    <string name="export_username">Utilisateur (vide = invité)</string>
+    <string name="export_password">Mot de passe</string>
+    <string name="export_note">La session en cours d\'enregistrement est ignorée. Les fichiers déjà présents sur le serveur ne sont pas renvoyés.</string>
+    <string name="export_start">Exporter</string>
+    <string name="export_connecting">Connexion au serveur…</string>
+    <string name="export_running">Envoi : %1$d / %2$d fichiers</string>
+    <string name="export_success">Terminé : %1$d envoyés, %2$d déjà sur le serveur</string>
+    <string name="export_failed">Échec de l\'export : %1$s</string>
 </resources>

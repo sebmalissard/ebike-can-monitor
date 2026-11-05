@@ -32,6 +32,14 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        resources {
+            // Duplicated metadata pulled in by BouncyCastle (dependency of jcifs-ng)
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            excludes += "META-INF/versions/**"
+        }
+    }
 }
 
 kotlin {
@@ -49,6 +57,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")
+
+    // SMB2/3 client used to export the logs to the Samba server
+    implementation("eu.agno3.jcifs:jcifs-ng:2.1.10")
+    implementation("org.slf4j:slf4j-nop:2.0.16")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

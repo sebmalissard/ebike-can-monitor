@@ -14,6 +14,9 @@
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- Export of the session files to the Samba server over the local network -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Foreground service keeping the BLE link alive while connected -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />

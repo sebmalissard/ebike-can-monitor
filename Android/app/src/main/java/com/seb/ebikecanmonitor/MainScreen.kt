@@ -24,8 +24,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -45,6 +47,7 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.SpanStyle
@@ -58,6 +61,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.seb.ebikecanmonitor.ble.BleState
 import com.seb.ebikecanmonitor.companion.CompanionPairing
 import com.seb.ebikecanmonitor.record.Recordings
+import com.seb.ebikecanmonitor.record.SmbExporter
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -91,6 +95,8 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
     val recordingError by vm.recordingError.collectAsStateWithLifecycle()
     val recordings by vm.recordings.collectAsStateWithLifecycle()
     var showRecordings by remember { mutableStateOf(false) }
+    var showExport by remember { mutableStateOf(false) }
+    val exportState by vm.exportState.collectAsStateWithLifecycle()
     val viewer by vm.viewer.collectAsStateWithLifecycle()
 
     var autoScroll by remember { mutableStateOf(true) }
@@ -188,6 +194,24 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 showRecordings = false
             },
             onDismiss = { showRecordings = false },
+            onExport = {
+                showRecordings = false
+                vm.resetExport()
+                showExport = true
+            },
+        )
+    }
+
+    if (showExport) {
+        ExportDialog(
+            state = exportState,
+            initialUsername = remember { vm.savedSmbUsername() },
+            initialPassword = remember { vm.savedSmbPassword() },
+            onExport = vm::exportToSmb,
+            onDismiss = {
+                vm.resetExport()
+                showExport = false
+            },
         )
     }
 
@@ -350,6 +374,7 @@ private fun RecordingsDialog(
     recordings: List<Recordings.Recording>,
     onOpen: (Recordings.Recording) -> Unit,
     onDismiss: () -> Unit,
+    onExport: () -> Unit,
 ) {
     val context = LocalContext.current
     val dateFormatter = remember {
@@ -397,6 +422,102 @@ private fun RecordingsDialog(
         },
         confirmButton = {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.close)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onExport, enabled = recordings.isNotEmpty()) {
+                Text(stringResource(R.string.export_button))
+            }
+        },
+    )
+}
+
+/** Asks for the Samba credentials and uploads the saved sessions to the server. */
+@Composable
+private fun ExportDialog(
+    state: ExportState,
+    initialUsername: String,
+    initialPassword: String,
+    onExport: (username: String, password: String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var username by remember { mutableStateOf(initialUsername) }
+    var password by remember { mutableStateOf(initialPassword) }
+    val running = state is ExportState.Running
+
+    AlertDialog(
+        onDismissRequest = { if (!running) onDismiss() },
+        title = { Text(stringResource(R.string.export_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = stringResource(R.string.export_target, SmbExporter.DISPLAY_PATH),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it },
+                    label = { Text(stringResource(R.string.export_username)) },
+                    singleLine = true,
+                    enabled = !running,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    label = { Text(stringResource(R.string.export_password)) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    enabled = !running,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = stringResource(R.string.export_note),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                when (state) {
+                    is ExportState.Idle -> Unit
+                    is ExportState.Running -> {
+                        if (state.total > 0) {
+                            LinearProgressIndicator(
+                                progress = { state.done.toFloat() / state.total },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                            Text(
+                                text = stringResource(R.string.export_running, state.done, state.total),
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Text(
+                                text = stringResource(R.string.export_connecting),
+                                style = MaterialTheme.typography.labelMedium,
+                            )
+                        }
+                    }
+                    is ExportState.Success -> Text(
+                        text = stringResource(R.string.export_success, state.uploaded, state.skipped),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    is ExportState.Failure -> Text(
+                        text = stringResource(R.string.export_failed, state.message),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onExport(username, password) },
+                enabled = !running,
+            ) { Text(stringResource(R.string.export_start)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, enabled = !running) {
+                Text(stringResource(R.string.close))
+            }
         },
     )
 }

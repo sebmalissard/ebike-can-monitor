@@ -59,4 +59,17 @@
         <item quantity="one">%d line</item>
         <item quantity="other">%d lines</item>
     </plurals>
+
+    <!-- Export to the Samba server -->
+    <string name="export_button">Export to NAS</string>
+    <string name="export_title">Export to Samba server</string>
+    <string name="export_target">Destination: %1$s</string>
+    <string name="export_username">Username (empty = guest)</string>
+    <string name="export_password">Password</string>
+    <string name="export_note">The session being recorded is skipped. Files already on the server are not uploaded again.</string>
+    <string name="export_start">Export</string>
+    <string name="export_connecting">Connecting to the server…</string>
+    <string name="export_running">Uploading: %1$d / %2$d files</string>
+    <string name="export_success">Done: %1$d uploaded, %2$d already on the server</string>
+    <string name="export_failed">Export failed: %1$s</string>
 </resources>
