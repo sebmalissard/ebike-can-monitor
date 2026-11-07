@@ -177,9 +177,10 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         }
     }
 
-    // Auto-connect was left on: make sure the permissions are granted so it can work silently
+    // Auto-connect is already on at launch (e.g. enabled by an older version): run the setup chain
+    // so that anything missing (permissions, one-time pairing) is completed. A no-op once done.
     LaunchedEffect(Unit) {
-        if (autoConnect && !hasBlePermissions(context)) permissionLauncher.launch(BLE_PERMISSIONS)
+        if (autoConnect) setupActive = true
     }
 
     LaunchedEffect(entries.lastOrNull()?.id, autoScroll) {
