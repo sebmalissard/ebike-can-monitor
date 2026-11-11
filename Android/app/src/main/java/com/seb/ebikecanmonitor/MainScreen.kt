@@ -27,6 +27,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import kotlinx.coroutines.delay
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -119,11 +120,15 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         }
     }
 
-    // Setup chain run when auto-connect is switched on: notifications -> BLE permissions -> pairing.
+    // Setup chain run when auto-connect is switched on: notifications -> BLE permissions.
     // Each step is asked at most once per activation, whatever the answer.
     var setupActive by remember { mutableStateOf(false) }
     var setupTick by remember { mutableIntStateOf(0) }
-    val setupAsked = remember { BooleanArray(3) }
+    val setupAsked = remember { BooleanArray(2) }
+
+    // One-time pairing with the ESP32 (CompanionDeviceManager), started by the Pair button only.
+    var associated by remember { mutableStateOf(CompanionPairing.isAssociated(context)) }
+    var pairing by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -142,10 +147,40 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
 
     val associationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
-    ) { setupTick++ }
+    ) {
+        // Pairing dialog closed (approved, cancelled or timed out): resume auto-connect
+        pairing = false
+        vm.endPairing()
+        associated = CompanionPairing.isAssociated(context)
+    }
 
     fun onConnectClick() {
         if (hasBlePermissions(context)) startConnection() else permissionLauncher.launch(BLE_PERMISSIONS)
+    }
+
+    fun onPairClick() {
+        pairing = true
+        // Pause auto-connect: a connected ESP32 stops advertising and could not be found
+        vm.beginPairing()
+        CompanionPairing.associate(
+            context,
+            onPending = { associationLauncher.launch(IntentSenderRequest.Builder(it).build()) },
+            onFailure = {
+                pairing = false
+                vm.endPairing()
+                vm.reportStatus(context.getString(R.string.status_association_failed, it))
+            },
+        )
+    }
+
+    // The association can be recorded slightly after the dialog closes: re-check for a few seconds
+    LaunchedEffect(pairing) {
+        if (pairing) return@LaunchedEffect
+        repeat(6) {
+            associated = CompanionPairing.isAssociated(context)
+            if (associated) return@LaunchedEffect
+            delay(500)
+        }
     }
 
     LaunchedEffect(setupActive, setupTick) {
@@ -159,17 +194,6 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                 setupAsked[1] = true
                 permissionLauncher.launch(BLE_PERMISSIONS)
             }
-            !setupAsked[2] && !CompanionPairing.isAssociated(context) -> {
-                setupAsked[2] = true
-                CompanionPairing.associate(
-                    context,
-                    onPending = { associationLauncher.launch(IntentSenderRequest.Builder(it).build()) },
-                    onFailure = {
-                        vm.reportStatus(context.getString(R.string.status_association_failed, it))
-                        setupTick++
-                    },
-                )
-            }
             else -> {
                 setupActive = false
                 if (state == BleState.Disconnected && hasBlePermissions(context)) startConnection()
@@ -177,8 +201,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
         }
     }
 
-    // Auto-connect is already on at launch (e.g. enabled by an older version): run the setup chain
-    // so that anything missing (permissions, one-time pairing) is completed. A no-op once done.
+    // Auto-connect is already on at launch: make sure the permissions are in place
     LaunchedEffect(Unit) {
         if (autoConnect) setupActive = true
     }
@@ -271,7 +294,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     onClick = ::onConnectClick,
-                    enabled = state == BleState.Disconnected,
+                    enabled = state == BleState.Disconnected && !pairing,
                 ) { Text(stringResource(R.string.app_connect)) }
 
                 OutlinedButton(
@@ -296,7 +319,7 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     onCheckedChange = { enabled ->
                         vm.setAutoConnect(enabled)
                         if (enabled) {
-                            // Run the setup chain: notifications, BLE permissions, one-time pairing
+                            // Run the setup chain: notifications, then BLE permissions
                             setupAsked.fill(false)
                             setupActive = true
                             setupTick++
@@ -306,6 +329,30 @@ fun MainScreen(vm: MainViewModel = viewModel()) {
                     },
                     modifier = Modifier.padding(start = 8.dp),
                 )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    text = stringResource(
+                        when {
+                            pairing -> R.string.pairing_searching
+                            associated -> R.string.pairing_ok
+                            else -> R.string.pairing_missing
+                        }
+                    ),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (associated) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedButton(
+                    onClick = ::onPairClick,
+                    enabled = !pairing,
+                ) { Text(stringResource(R.string.pairing_button)) }
             }
 
             Row(

@@ -54,6 +54,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val monitor = Monitor.get(app)
 
+    init {
+        // The app was opened: try to connect for a while (the process may already be alive)
+        monitor.startRetryWindow()
+    }
+
     /** File currently being recorded (null when no session is running). */
     val recordingInfo: StateFlow<SessionRecorder.Info?> = monitor.recorder.info
     val recordingError: StateFlow<String?> = monitor.recorder.error
@@ -70,6 +75,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun clear() = monitor.clear()
     fun setAutoConnect(enabled: Boolean) = monitor.setAutoConnect(enabled)
     fun reportStatus(message: String) = monitor.reportStatus(message)
+    fun beginPairing() = monitor.beginPairing()
+    fun endPairing() = monitor.endPairing()
     fun onPermissionDenied() =
         monitor.reportStatus(getApplication<Application>().getString(R.string.status_permission_denied))
 

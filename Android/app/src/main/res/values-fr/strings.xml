@@ -8,6 +8,10 @@
 
     <string name="auto_scroll">Défilement auto</string>
     <string name="auto_connect">Connexion automatique</string>
+    <string name="pairing_ok">ESP32 associé : réveil automatique activé</string>
+    <string name="pairing_missing">ESP32 non associé : pas de réveil en arrière-plan</string>
+    <string name="pairing_searching">Recherche de l\'ESP32 (allume l\'ebike)…</string>
+    <string name="pairing_button">Associer</string>
 
     <plurals name="messages_count">
         <item quantity="one">%d message</item>

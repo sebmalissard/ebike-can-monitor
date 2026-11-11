@@ -2,6 +2,7 @@ package com.seb.ebikecanmonitor
 
 import android.bluetooth.BluetoothManager
 import android.content.Context
+import android.os.SystemClock
 import com.seb.ebikecanmonitor.ble.BleClient
 import com.seb.ebikecanmonitor.ble.BleEvent
 import com.seb.ebikecanmonitor.ble.BleState
@@ -34,6 +35,8 @@ class Monitor private constructor(context: Context) {
         private const val UI_REFRESH_MS = 100L
         private const val NO_SEQ = -1L
         private const val AUTO_CONNECT_INTERVAL_MS = 3_000L
+        private const val RETRY_WINDOW_MS = 60_000L
+        private const val PAIRING_TIMEOUT_MS = 90_000L
         private const val PREFS_NAME = "settings"
         private const val KEY_AUTO_CONNECT = "auto_connect"
 
@@ -78,9 +81,12 @@ class Monitor private constructor(context: Context) {
     fun setAutoConnect(enabled: Boolean) {
         _autoConnect.value = enabled
         prefs.edit().putBoolean(KEY_AUTO_CONNECT, enabled).apply()
+        if (enabled) startRetryWindow()
     }
 
     fun connect() {
+        // No connection while the pairing dialog searches: a connected ESP32 would not be found
+        if (isPairing()) return
         // The ESP32 seq keeps running while disconnected: do not count that as a loss
         lastSeq.set(NO_SEQ)
         client.connect()
@@ -101,7 +107,10 @@ class Monitor private constructor(context: Context) {
 
     /** Called by the companion service when the system sees the paired ESP32 in range. */
     fun onDeviceNearby() {
-        scope.launch { tryAutoConnect() }
+        scope.launch {
+            startRetryWindow()
+            tryAutoConnect()
+        }
     }
 
     // ----------------------------------------------------------- Auto-connect
@@ -113,9 +122,47 @@ class Monitor private constructor(context: Context) {
     }
 
     private fun tryAutoConnect() {
+        if (isPairing()) return
         if (_autoConnect.value && client.state.value == BleState.Disconnected && canConnectSilently()) {
             connect()
         }
+    }
+
+    /** Deadline (elapsedRealtime) until which failed or lost connections are retried. */
+    @Volatile private var retryUntilMs = 0L
+
+    /**
+     * Opens a time-limited window during which the app keeps trying to connect. Outside of it
+     * nothing scans: once the ESP32 is paired, Android wakes the app when it appears, so a
+     * permanent scan loop would only drain the battery.
+     */
+    fun startRetryWindow() {
+        retryUntilMs = SystemClock.elapsedRealtime() + RETRY_WINDOW_MS
+    }
+
+    private fun isRetryWindowOpen() = SystemClock.elapsedRealtime() < retryUntilMs
+
+    // ---------------------------------------------------------------- Pairing
+
+    /** Deadline (elapsedRealtime) until which auto-connect is paused for the pairing dialog. */
+    @Volatile private var pairingUntilMs = 0L
+
+    private fun isPairing() = SystemClock.elapsedRealtime() < pairingUntilMs
+
+    /**
+     * Pauses auto-connect while the system pairing dialog searches for the ESP32. A BLE peripheral
+     * stops advertising once connected, so a live connection would hide it from that search.
+     * The pause ends with [endPairing] or after [PAIRING_TIMEOUT_MS] at most.
+     */
+    fun beginPairing() {
+        pairingUntilMs = SystemClock.elapsedRealtime() + PAIRING_TIMEOUT_MS
+        if (client.state.value != BleState.Disconnected) client.disconnect()
+    }
+
+    fun endPairing() {
+        pairingUntilMs = 0L
+        // Pairing is over: let auto-connect take over right away
+        startRetryWindow()
     }
 
     // ------------------------------------------------------------ Data path
@@ -182,23 +229,33 @@ class Monitor private constructor(context: Context) {
             }
         }
 
-        // Auto-connect loop: whenever enabled and disconnected, start a new attempt.
-        // A failed scan or a lost link ends in Disconnected, so the next tick retries.
+        // Auto-connect loop: while the retry window is open, retry whenever disconnected.
+        // A failed scan ends in Disconnected, so the next tick tries again. Once the window
+        // closes nothing scans any more: Android wakes the app when the paired ESP32 appears.
         scope.launch {
             while (isActive) {
-                tryAutoConnect()
+                if (isRetryWindowOpen()) tryAutoConnect()
                 delay(AUTO_CONNECT_INTERVAL_MS)
             }
         }
 
-        // Keep the process alive while a connection is active (foreground service).
+        // Keep the process alive while a connection is active (foreground service),
+        // and retry for a while when an established link is lost.
         scope.launch {
+            var previous = client.state.value
             client.state.collect { state ->
                 if (state == BleState.Connecting || state == BleState.Connected) {
                     MonitorService.start(appContext)
                 }
+                if (previous == BleState.Connected && state == BleState.Disconnected) {
+                    startRetryWindow()
+                }
+                previous = state
             }
         }
+
+        // The process just started (app opened or woken up): try to connect for a while
+        startRetryWindow()
 
         // Make sure the system keeps watching for the paired ESP32 (survives app updates/reboots).
         CompanionPairing.ensureObserving(appContext)

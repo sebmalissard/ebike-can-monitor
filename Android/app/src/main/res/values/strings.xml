@@ -8,6 +8,10 @@
 
     <string name="auto_scroll">Auto-scroll</string>
     <string name="auto_connect">Auto-connect</string>
+    <string name="pairing_ok">ESP32 paired: automatic wake-up enabled</string>
+    <string name="pairing_missing">ESP32 not paired: no wake-up in background</string>
+    <string name="pairing_searching">Searching for ESP32 (turn the bike on)…</string>
+    <string name="pairing_button">Pair</string>
 
     <plurals name="messages_count">
         <item quantity="one">%d message</item>
