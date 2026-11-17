@@ -31,7 +31,11 @@ import kotlinx.coroutines.launch
  * on disk access. Every batch is flushed, so a crash loses almost nothing.
  *
  * CSV columns: phone_time_ms,seq,esp_ts_us,id_hex,extended,rtr,dlc,data_hex
- * Lines starting with '#' are comments (bus status counters from the ESP32).
+ * Lines starting with '#' are comments:
+ *  - `# status,<phone_ms>,missed=N,overrun=N` bus status counters from the ESP32
+ *  - `# info,...`  phone and app description (once per file)
+ *  - `# event,<phone_ms>,<name>,key=value...` BLE events (scan, connection, disconnection reason...)
+ *  - `# link,<phone_ms>,key=value...` BLE link quality, once per second (see LinkDiagnostics)
  */
 class SessionRecorder(context: Context) {
 
@@ -70,6 +74,12 @@ class SessionRecorder(context: Context) {
     /** Queues a batch for writing. Ignored when no session is running. */
     fun write(batch: List<LogEntry>) {
         channel?.trySend(batch)
+    }
+
+    /** Queues a comment line (must start with "# ") in order with the batches. Ignored when no session is running. */
+    fun writeNote(text: String) {
+        val entry = LogEntry(0L, System.currentTimeMillis(), text, CanMessage.Unknown(text))
+        channel?.trySend(listOf(entry))
     }
 
     /** Ends the current session. Already queued batches are still written before the file is closed. */
@@ -170,6 +180,10 @@ class SessionRecorder(context: Context) {
             w.write("# status,${entry.timestampMs},missed=${m.missed},overrun=${m.overrun}\n")
             0
         }
-        is CanMessage.Unknown -> 0
+        is CanMessage.Unknown -> {
+            // Diagnostic comment lines ("# link", "# event", "# info") are queued as Unknown entries
+            if (m.raw.startsWith("# ")) w.write(m.raw + "\n")
+            0
+        }
     }
 }

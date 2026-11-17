@@ -202,6 +202,11 @@ class Monitor private constructor(context: Context) {
                     batch = ArrayList()
                     recorder.stop()
                 }
+                is BleEvent.Note -> {
+                    publish(batch)
+                    batch = ArrayList()
+                    recorder.writeNote(event.text)
+                }
             }
             event = client.events.tryReceive().getOrNull()
         }

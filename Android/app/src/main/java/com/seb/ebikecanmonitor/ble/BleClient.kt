@@ -42,6 +42,9 @@ sealed interface BleEvent {
     data class Line(val entry: LogEntry) : BleEvent
     data class SessionStart(val timeMs: Long) : BleEvent
     data object SessionEnd : BleEvent
+
+    /** Diagnostic comment line ("# link", "# event", "# info") to write in the recording, in order. */
+    data class Note(val text: String) : BleEvent
 }
 
 /**
@@ -62,6 +65,8 @@ class BleClient(context: Context) {
         const val SCAN_TIMEOUT_MS = 15_000L
         const val CONNECT_TIMEOUT_MS = 15_000L
         const val DISCONNECT_TIMEOUT_MS = 3_000L
+        const val LINK_TICK_MS = 1_000L
+        const val MAX_PENDING_NOTES = 100
     }
 
     private val appContext = context.applicationContext
@@ -83,6 +88,12 @@ class BleClient(context: Context) {
 
     private val idGenerator = AtomicLong()
     private val lineBuffer = StringBuilder()
+
+    private val diag = LinkDiagnostics(appContext)
+
+    /** Events that happen outside a session (scan, failed connection): written in the next file. */
+    private val pendingNotes = ArrayList<String>()
+    private var scanStartMs = 0L
 
     @Volatile private var gatt: BluetoothGatt? = null
     @Volatile private var userRequestedDisconnect = false
@@ -119,6 +130,8 @@ class BleClient(context: Context) {
         scanning = true
         _state.value = BleState.Scanning
         _status.value = str(R.string.status_scanning, DEVICE_NAME)
+        scanStartMs = System.currentTimeMillis()
+        note("scan_start")
         leScanner.startScan(listOf(filter), settings, scanCallback)
         mainHandler.postDelayed(scanTimeout, SCAN_TIMEOUT_MS)
     }
@@ -165,11 +178,13 @@ class BleClient(context: Context) {
             stopScan()
             _state.value = BleState.Disconnected
             _status.value = str(R.string.status_not_found, DEVICE_NAME)
+            note("scan_timeout", "scan_ms=${System.currentTimeMillis() - scanStartMs}")
         }
     }
 
     private val connectTimeout = Runnable {
         if (_state.value == BleState.Connecting) {
+            note("connect_timeout")
             forceCleanup(str(R.string.status_connect_timeout))
         }
     }
@@ -212,6 +227,7 @@ class BleClient(context: Context) {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             if (!scanning) return
             stopScan()
+            note("scan_result", "rssi=${result.rssi}", "scan_ms=${System.currentTimeMillis() - scanStartMs}")
             val device: BluetoothDevice = result.device
             _state.value = BleState.Connecting
             _status.value = str(R.string.status_connecting, device.name ?: device.address)
@@ -223,6 +239,7 @@ class BleClient(context: Context) {
             stopScan()
             _state.value = BleState.Disconnected
             _status.value = str(R.string.status_scan_failed, errorCode)
+            note("scan_failed", "error=$errorCode")
         }
     }
 
@@ -232,12 +249,23 @@ class BleClient(context: Context) {
 
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                diag.onNewConnection()
+                note("gatt_connected")
                 _status.value = str(R.string.status_negotiating_mtu)
                 if (!g.requestMtu(REQUESTED_MTU)) g.discoverServices()
             } else {
                 // Déconnexion (volontaire, perte de lien, ou échec de connexion)
                 mainHandler.removeCallbacks(connectTimeout)
                 mainHandler.removeCallbacks(forceClose)
+                note(
+                    "disconnect",
+                    "status=$status",
+                    "status_name=${LinkDiagnostics.gattStatusName(status)}",
+                    "new_state=$newState",
+                    "user_requested=${if (userRequestedDisconnect) 1 else 0}",
+                    "in_session=${if (sessionActive.get()) 1 else 0}",
+                    *diag.summaryFields(),
+                )
                 g.close()
                 endSession()
                 if (gatt === g) gatt = null
@@ -251,6 +279,8 @@ class BleClient(context: Context) {
         }
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+            diag.onMtu(mtu)
+            note("mtu", "mtu=$mtu", "status=$status")
             _status.value = str(R.string.status_discovering_services)
             g.discoverServices()
         }
@@ -273,6 +303,7 @@ class BleClient(context: Context) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 mainHandler.removeCallbacks(connectTimeout)
                 startSession()
+                g.readPhy()
                 _state.value = BleState.Connected
                 _status.value = str(R.string.status_connected, DEVICE_NAME)
             } else {
@@ -280,6 +311,22 @@ class BleClient(context: Context) {
                 userRequestedDisconnect = true
                 g.disconnect()
             }
+        }
+
+        override fun onReadRemoteRssi(g: BluetoothGatt, rssi: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) diag.onRssi(rssi)
+        }
+
+        override fun onPhyRead(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            diag.onPhy(txPhy, rxPhy)
+            note("phy", "tx=$txPhy", "rx=$rxPhy")
+        }
+
+        override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            diag.onPhy(txPhy, rxPhy)
+            note("phy", "tx=$txPhy", "rx=$rxPhy")
         }
 
         override fun onCharacteristicChanged(
@@ -293,16 +340,56 @@ class BleClient(context: Context) {
 
     // ---------------------------------------------------------------- Sessions
 
+    // ------------------------------------------------------------ Diagnostics
+
+    /** Builds a "# event" comment line and sends it to the recording, or keeps it for the next file. */
+    private fun note(name: String, vararg fields: String) {
+        val text = buildString {
+            append("# event,").append(System.currentTimeMillis()).append(',').append(name)
+            for (field in fields) append(',').append(field)
+        }
+        if (sessionActive.get()) {
+            events.trySend(BleEvent.Note(text))
+        } else {
+            synchronized(pendingNotes) {
+                pendingNotes.add(text)
+                if (pendingNotes.size > MAX_PENDING_NOTES) pendingNotes.removeAt(0)
+            }
+        }
+    }
+
+    /** Once per second while a session is active: asks for a new RSSI and writes a "# link" line. */
+    private val linkTick = object : Runnable {
+        override fun run() {
+            if (!sessionActive.get()) return
+            try {
+                gatt?.readRemoteRssi()
+            } catch (_: RuntimeException) {
+                // The link is going down: the disconnection event will say why
+            }
+            events.trySend(BleEvent.Note(diag.linkLine(System.currentTimeMillis())))
+            mainHandler.postDelayed(this, LINK_TICK_MS)
+        }
+    }
+
     /** Queues [BleEvent.SessionStart] before any line of the new connection. */
     private fun startSession() {
         if (sessionActive.compareAndSet(false, true)) {
             events.trySend(BleEvent.SessionStart(System.currentTimeMillis()))
+            diag.resetCounters()
+            events.trySend(BleEvent.Note(diag.infoLine(System.currentTimeMillis())))
+            synchronized(pendingNotes) {
+                for (text in pendingNotes) events.trySend(BleEvent.Note(text))
+                pendingNotes.clear()
+            }
+            mainHandler.postDelayed(linkTick, LINK_TICK_MS)
         }
     }
 
     /** Queues [BleEvent.SessionEnd] after every line already received on this connection. */
     private fun endSession() {
         if (sessionActive.compareAndSet(true, false)) {
+            mainHandler.removeCallbacks(linkTick)
             events.trySend(BleEvent.SessionEnd)
         }
     }
@@ -310,6 +397,7 @@ class BleClient(context: Context) {
     // ------------------------------------------------- Réassemblage des lignes
 
     private fun handleChunk(value: ByteArray) {
+        diag.onChunk(value.size)
         val completed = ArrayList<String>()
         synchronized(lineBuffer) {
             lineBuffer.append(value.toString(Charsets.UTF_8))
@@ -326,7 +414,9 @@ class BleClient(context: Context) {
         val now = System.currentTimeMillis()
         for (line in completed) {
             if (line.isNotBlank()) {
-                events.trySend(BleEvent.Line(LogEntry(idGenerator.incrementAndGet(), now, line, CanProtocol.parse(line))))
+                val message = CanProtocol.parse(line)
+                if (message is CanMessage.Frame) diag.onFrame(message.seq)
+                events.trySend(BleEvent.Line(LogEntry(idGenerator.incrementAndGet(), now, line, message)))
             }
         }
     }
