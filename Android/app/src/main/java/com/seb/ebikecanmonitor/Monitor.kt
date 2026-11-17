@@ -63,6 +63,15 @@ class Monitor private constructor(context: Context) {
     /** Last `seq` received (NO_SEQ after a (re)connection). */
     private val lastSeq = AtomicLong(NO_SEQ)
 
+    /** True after the user pressed disconnect: the recording file is then closed at once. */
+    @Volatile private var manualDisconnect = false
+
+    // Recording continuity across a short disconnection (only used from the drain coroutine)
+    private var lastSessionEndMs = 0L
+    private var recordedSeq = NO_SEQ
+    private var recordedTsUs = 0L
+    private var checkSeqGap = false
+
     /** Frames lost between the ESP32 and the app (`seq` gaps, e.g. saturated BLE buffer). */
     private val _lostFrames = MutableStateFlow(0L)
     val lostFrames: StateFlow<Long> = _lostFrames.asStateFlow()
@@ -94,6 +103,7 @@ class Monitor private constructor(context: Context) {
 
     /** A manual disconnect also turns auto-connect off, otherwise it would reconnect at once. */
     fun disconnect() {
+        manualDisconnect = true
         setAutoConnect(false)
         client.disconnect()
     }
@@ -175,10 +185,35 @@ class Monitor private constructor(context: Context) {
                 if (prev != NO_SEQ && m.seq > prev + 1) {
                     _lostFrames.update { it + (m.seq - prev - 1) }
                 }
+                checkRecordedGap(entry.timestampMs, m)
             }
             is CanMessage.Status -> _busStatus.value = m
             is CanMessage.Unknown -> Unit
         }
+    }
+
+    /**
+     * After a resumed recording (link lost then recovered, same file), marks in the CSV whether
+     * frames were lost during the disconnection. Written just before the first frame that follows.
+     */
+    private fun checkRecordedGap(timeMs: Long, m: CanMessage.Frame) {
+        if (checkSeqGap) {
+            checkSeqGap = false
+            if (recordedSeq != NO_SEQ) {
+                val note = when {
+                    m.seq > recordedSeq + 1 -> {
+                        val lost = m.seq - recordedSeq - 1
+                        _lostFrames.update { it + lost }
+                        "seq_gap,from=$recordedSeq,to=${m.seq},lost=$lost,esp_gap_ms=${(m.tsUs - recordedTsUs) / 1000}"
+                    }
+                    m.seq <= recordedSeq -> "esp_reboot,from=$recordedSeq,to=${m.seq}"
+                    else -> "seq_continuous,seq=${m.seq}"
+                }
+                recorder.writeNote("# event,$timeMs,$note")
+            }
+        }
+        recordedSeq = m.seq
+        recordedTsUs = m.tsUs
     }
 
     /**
@@ -195,12 +230,21 @@ class Monitor private constructor(context: Context) {
                 is BleEvent.SessionStart -> {
                     publish(batch)
                     batch = ArrayList()
-                    recorder.start(event.timeMs)
+                    val resumed = recorder.start(event.timeMs)
+                    manualDisconnect = false
+                    if (resumed) {
+                        checkSeqGap = true
+                        recorder.writeNote("# event,${event.timeMs},session_resumed,gap_ms=${event.timeMs - lastSessionEndMs}")
+                    } else {
+                        checkSeqGap = false
+                        recordedSeq = NO_SEQ
+                    }
                 }
                 BleEvent.SessionEnd -> {
                     publish(batch)
                     batch = ArrayList()
-                    recorder.stop()
+                    lastSessionEndMs = System.currentTimeMillis()
+                    recorder.stop(immediate = manualDisconnect)
                 }
                 is BleEvent.Note -> {
                     publish(batch)

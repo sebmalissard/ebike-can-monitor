@@ -16,11 +16,13 @@ import java.time.format.DateTimeFormatter
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -45,6 +47,9 @@ class SessionRecorder(context: Context) {
     companion object {
         private const val CSV_HEADER = "phone_time_ms,seq,esp_ts_us,id_hex,extended,rtr,dlc,data_hex\n"
         private const val HEX_DIGITS = "0123456789ABCDEF"
+
+        /** After a disconnection the file stays open this long: a reconnection continues in the same file. */
+        private const val RESUME_WINDOW_MS = 30_000L
     }
 
     private val appContext = context.applicationContext
@@ -61,14 +66,25 @@ class SessionRecorder(context: Context) {
     /** Queue of the current session; null when no session is running. */
     @Volatile private var channel: Channel<List<LogEntry>>? = null
 
-    /** Starts a new session file named after [startMs]. No-op if a session is already running. */
+    /** Pending delayed close of the file after a disconnection (null when none is scheduled). */
+    private var closeJob: Job? = null
+
+    /**
+     * Starts a new session file named after [startMs].
+     * If the previous file is still open (short disconnection, see [stop]), keeps writing in it.
+     *
+     * @return true when the previous file was resumed, false when a new file was created.
+     */
     @Synchronized
-    fun start(startMs: Long) {
-        if (channel != null) return
+    fun start(startMs: Long): Boolean {
+        closeJob?.cancel()
+        closeJob = null
+        if (channel != null) return true
         val ch = Channel<List<LogEntry>>(Channel.UNLIMITED)
         channel = ch
         _error.value = null
         scope.launch { record(startMs, ch) }
+        return false
     }
 
     /** Queues a batch for writing. Ignored when no session is running. */
@@ -82,9 +98,33 @@ class SessionRecorder(context: Context) {
         channel?.trySend(listOf(entry))
     }
 
-    /** Ends the current session. Already queued batches are still written before the file is closed. */
+    /**
+     * Ends the current session. Already queued batches are still written before the file is closed.
+     *
+     * Unless [immediate] is true, the file is kept open for [RESUME_WINDOW_MS] so that a reconnection
+     * (link lost then recovered) continues in the same file instead of creating a new one.
+     */
     @Synchronized
-    fun stop() {
+    fun stop(immediate: Boolean = false) {
+        if (channel == null) return
+        closeJob?.cancel()
+        closeJob = null
+        if (immediate) {
+            closeNow()
+            return
+        }
+        closeJob = scope.launch {
+            delay(RESUME_WINDOW_MS)
+            synchronized(this@SessionRecorder) {
+                // Ignore a close that was cancelled by start() while waiting for the lock
+                if (closeJob === coroutineContext[Job]) closeNow()
+            }
+        }
+    }
+
+    @Synchronized
+    private fun closeNow() {
+        closeJob = null
         channel?.close()
         channel = null
         _info.value = null
