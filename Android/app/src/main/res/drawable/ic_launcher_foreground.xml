@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- ICON_SCALE: global reduction of the whole drawing -->
+    <group android:pivotX="54" android:pivotY="55" android:scaleX="0.88" android:scaleY="0.88">
+    <!-- Gauge arc (140 degrees, ends kept away from the mask edges) -->
+    <path
+        android:pathData="M27.7,46.4A28,28 0,0 1,80.3,46.4"
+        android:strokeColor="#22D3EE"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <!-- Gauge value segment -->
+    <path
+        android:pathData="M68,31.75A28,28 0,0 1,80.3,46.4"
+        android:strokeColor="#FB923C"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <!-- Lightning bolt -->
+    <path
+        android:fillColor="#FACC15"
+        android:pathData="M57.5,32L49,41.5H54.5L51.5,48.5L61,38H55.5Z" />
+    <!-- E-bike -->
+    <group
+        android:pivotX="54"
+        android:pivotY="56"
+        android:scaleX="0.8"
+        android:scaleY="0.8"
+        android:translateY="9.4">
+        <path
+            android:pathData="M34,64m-12,0a12,12 0,1 1,24 0a12,12 0,1 1,-24 0"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="4.5" />
+        <path
+            android:pathData="M74,64m-12,0a12,12 0,1 1,24 0a12,12 0,1 1,-24 0"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="4.5" />
+        <path
+            android:pathData="M34,64L44,46L64,46L74,64M34,64L54,64L44,46M54,64L64,46M44,46L43,40M64,46L62,40H68"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <!-- Saddle -->
+        <path
+            android:pathData="M37,39.5H48"
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="5.5"
+            android:strokeLineCap="round" />
+    </group>
+    </group>
+</vector>
