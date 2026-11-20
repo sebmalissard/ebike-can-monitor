@@ -4,26 +4,23 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
-import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
+import com.seb.ebikecanmonitor.record.JsonLines
 
 /**
- * Collects BLE link quality indicators that are written to the CSV recording as comment lines:
- *
- *  - `# info,<phone_ms>,...` once per session (phone and app description)
- *  - `# link,<phone_ms>,...` once per second while connected
- *
- * Fields of a `# link` line (counters cover the last interval only, "?" = unknown):
- *  - rssi / rssi_age_ms : last RSSI read from the ESP32 (dBm) and its age
- *  - notif / bytes      : BLE notifications received and their total size
- *  - frames / seq_lost  : CAN frames received and `seq` gaps seen between them
- *  - gap_max_ms         : longest time between two notifications (includes the current silence)
- *  - silence_ms         : time since the last notification when the line was written
- *  - phy / mtu          : PHY and MTU negotiated with the ESP32
- *  - a2dp / hfp         : Bluetooth audio profiles connected on the phone (headphones...)
- *  - gatt_devices       : GATT devices connected to the phone (includes the ESP32)
- *  - power_save / doze / screen : Android power state
+ * Collects the BLE link quality indicators written to the recording as `link` records
+ * (once per second while connected, see [JsonLines]). Fields, covering the last interval
+ * for the counters, null when unknown:
+ *  - rssi_dbm / rssi_age_ms : last RSSI read from the ESP32 and its age
+ *  - notifications / bytes  : BLE notifications received and their total size
+ *  - frames / lost_frames   : CAN frames received and `sequence` gaps seen between them
+ *  - max_gap_ms             : longest time between two notifications (includes the current silence)
+ *  - silence_ms             : time since the last notification when the record was written
+ *  - phy / mtu              : PHY and MTU negotiated with the ESP32
+ *  - audio_a2dp_connected / audio_hfp_connected : Bluetooth audio profiles connected on the phone
+ *  - gatt_device_count      : GATT devices connected to the phone (includes the ESP32)
+ *  - power_save / doze / screen_on : Android power state
  *
  * Counters are updated from the Bluetooth binder thread and read from the main thread.
  */
@@ -45,6 +42,15 @@ class LinkDiagnostics(context: Context) {
             133 -> "GATT_ERROR"
             257 -> "GATT_FAILURE"
             else -> "UNKNOWN"
+        }
+
+        /** Readable name of a PHY constant of [android.bluetooth.BluetoothDevice]. */
+        fun phyName(phy: Int?): String = when (phy) {
+            null -> "?"
+            1 -> "1M"
+            2 -> "2M"
+            3 -> "coded"
+            else -> phy.toString()
         }
     }
 
@@ -146,55 +152,54 @@ class LinkDiagnostics(context: Context) {
 
     // ------------------------------------------------------------ Output
 
-    /** One `# link` comment line; also restarts the interval counters. */
-    fun linkLine(nowMs: Long): String {
+    /** One `link` record; also restarts the interval counters. */
+    fun linkRecord(nowMs: Long): String {
         val environment = environment()
         return synchronized(lock) {
             val nowNs = SystemClock.elapsedRealtimeNanos()
             val silenceNs = if (lastChunkNs == 0L) null else nowNs - lastChunkNs
             val gapNs = maxOf(gapMaxNs, silenceNs ?: 0L)
-            val line = buildString {
-                append("# link,").append(nowMs)
-                append(",rssi=").append(text(rssi))
-                append(",rssi_age_ms=").append(text(if (rssi == null) null else (nowNs - rssiAtNs) / NS_PER_MS))
-                append(",notif=").append(notifications)
-                append(",bytes=").append(bytes)
-                append(",frames=").append(frames)
-                append(",seq_lost=").append(seqLost)
-                append(",gap_max_ms=").append(gapNs / NS_PER_MS)
-                append(",silence_ms=").append(text(silenceNs?.let { it / NS_PER_MS }))
-                append(",phy=").append(phyName(txPhy)).append('/').append(phyName(rxPhy))
-                append(",mtu=").append(text(mtu))
-                append(",a2dp=").append(flag(environment.a2dp))
-                append(",hfp=").append(flag(environment.hfp))
-                append(",gatt_devices=").append(text(environment.gattDevices))
-                append(",power_save=").append(flag(environment.powerSave))
-                append(",doze=").append(flag(environment.doze))
-                append(",screen=").append(flag(environment.screenOn))
-            }
+            val rssiAgeMs = if (rssi == null) null else (nowNs - rssiAtNs) / NS_PER_MS
+            val silenceMs = silenceNs?.let { it / NS_PER_MS }
+            val phy = if (txPhy == null && rxPhy == null) null else "${phyName(txPhy)}/${phyName(rxPhy)}"
+            val record = JsonLines.record(
+                "link",
+                "phone_time_ms" to nowMs,
+                "rssi_dbm" to rssi,
+                "rssi_age_ms" to rssiAgeMs,
+                "notifications" to notifications,
+                "bytes" to bytes,
+                "frames" to frames,
+                "lost_frames" to seqLost,
+                "max_gap_ms" to gapNs / NS_PER_MS,
+                "silence_ms" to silenceMs,
+                "phy" to phy,
+                "mtu" to mtu,
+                "audio_a2dp_connected" to environment.a2dp,
+                "audio_hfp_connected" to environment.hfp,
+                "gatt_device_count" to environment.gattDevices,
+                "power_save" to environment.powerSave,
+                "doze" to environment.doze,
+                "screen_on" to environment.screenOn,
+            )
             notifications = 0
             bytes = 0L
             frames = 0
             seqLost = 0L
             gapMaxNs = 0L
-            line
+            record
         }
     }
 
-    /** One `# info` comment line describing the phone and the app. */
-    fun infoLine(nowMs: Long): String =
-        "# info,$nowMs,phone=${clean("${Build.MANUFACTURER} ${Build.MODEL}")}," +
-            "android=${Build.VERSION.RELEASE},sdk=${Build.VERSION.SDK_INT},app=${clean(appVersion())}"
-
-    /** Last known link state, appended to the disconnection event. */
-    fun summaryFields(): Array<String> = synchronized(lock) {
+    /** Last known link state, added to the disconnection event. */
+    fun summaryFields(): Array<Pair<String, Any?>> = synchronized(lock) {
         val nowNs = SystemClock.elapsedRealtimeNanos()
         val rssiAgeMs = if (rssi == null) null else (nowNs - rssiAtNs) / NS_PER_MS
         val silenceMs = if (lastChunkNs == 0L) null else (nowNs - lastChunkNs) / NS_PER_MS
-        arrayOf(
-            "last_rssi=${text(rssi)}",
-            "rssi_age_ms=${text(rssiAgeMs)}",
-            "silence_ms=${text(silenceMs)}",
+        arrayOf<Pair<String, Any?>>(
+            "last_rssi_dbm" to rssi,
+            "rssi_age_ms" to rssiAgeMs,
+            "silence_ms" to silenceMs,
         )
     }
 
@@ -233,27 +238,4 @@ class LinkDiagnostics(context: Context) {
         )
     }
 
-    private fun appVersion(): String = try {
-        appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: "?"
-    } catch (_: Exception) {
-        "?"
-    }
-
-    private fun clean(value: String) = value.replace(',', '_').replace(' ', '_')
-
-    private fun text(value: Any?): String = value?.toString() ?: "?"
-
-    private fun flag(value: Boolean?): String = when (value) {
-        true -> "1"
-        false -> "0"
-        null -> "?"
-    }
-
-    private fun phyName(phy: Int?): String = when (phy) {
-        null -> "?"
-        1 -> "1M"
-        2 -> "2M"
-        3 -> "coded"
-        else -> phy.toString()
-    }
 }

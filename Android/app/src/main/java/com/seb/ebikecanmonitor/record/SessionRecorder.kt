@@ -3,6 +3,7 @@ package com.seb.ebikecanmonitor.record
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.provider.MediaStore
 import com.seb.ebikecanmonitor.R
 import com.seb.ebikecanmonitor.ble.LogEntry
@@ -19,37 +20,42 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Records one CSV file per session in Downloads/eBikeCanMonitor.
+ * Records one JSON Lines file per session in Downloads/eBikeCanMonitor.
  *
- * The file name is derived from the session start time, e.g. `ebike_can_2026-11-03_14-32-05.csv`.
- * Batches are queued by [write] and written on an IO thread, so the UI/parsing path never blocks
- * on disk access. Every batch is flushed, so a crash loses almost nothing.
+ * The file name is derived from the session start time, e.g. `ebike_can_2026-11-03_14-32-05.jsonl`.
+ * The records (`meta`, `frame`, `status`, `link`, `event`, `end`) are described in [JsonLines].
  *
- * CSV columns: phone_time_ms,seq,esp_ts_us,id_hex,extended,rtr,dlc,data_hex
- * Lines starting with '#' are comments:
- *  - `# status,<phone_ms>,missed=N,overrun=N` bus status counters from the ESP32
- *  - `# info,...`  phone and app description (once per file)
- *  - `# event,<phone_ms>,<name>,key=value...` BLE events (scan, connection, disconnection reason...)
- *  - `# link,<phone_ms>,key=value...` BLE link quality, once per second (see LinkDiagnostics)
+ * Batches and records are queued by [write] and [writeRecord] and written on an IO thread, so the
+ * UI/parsing path never blocks on disk access. Everything queued is flushed after each write, so a
+ * crash loses almost nothing; a file closed normally ends with an `end` record.
  */
 class SessionRecorder(context: Context) {
 
-    /** Info about the file currently being recorded. */
+    /** Info about the file currently being recorded; [rows] is the number of `frame` records. */
     data class Info(val fileName: String, val rows: Long)
 
+    /** One element of the write queue. */
+    private sealed interface Item {
+        class Entries(val batch: List<LogEntry>) : Item
+        class Line(val json: String) : Item
+    }
+
     companion object {
-        private const val CSV_HEADER = "phone_time_ms,seq,esp_ts_us,id_hex,extended,rtr,dlc,data_hex\n"
         private const val HEX_DIGITS = "0123456789ABCDEF"
+        private const val MIME_TYPE = "application/x-ndjson"
 
         /** After a disconnection the file stays open this long: a reconnection continues in the same file. */
         private const val RESUME_WINDOW_MS = 30_000L
+
+        /** How often the close timer checks the wall clock. */
+        private const val CLOSE_POLL_MS = 1_000L
     }
 
     private val appContext = context.applicationContext
@@ -63,11 +69,17 @@ class SessionRecorder(context: Context) {
     /** Last recording error, cleared when a new session starts. */
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    /** True while a session file is open, including the short wait after a disconnection. */
+    val isOpen: Boolean get() = channel != null
+
     /** Queue of the current session; null when no session is running. */
-    @Volatile private var channel: Channel<List<LogEntry>>? = null
+    @Volatile private var channel: Channel<Item>? = null
 
     /** Pending delayed close of the file after a disconnection (null when none is scheduled). */
     private var closeJob: Job? = null
+
+    /** Wall-clock time of the last [stop], used to decide whether a file may still be resumed. */
+    @Volatile private var stoppedAtMs = 0L
 
     /**
      * Starts a new session file named after [startMs].
@@ -77,10 +89,16 @@ class SessionRecorder(context: Context) {
      */
     @Synchronized
     fun start(startMs: Long): Boolean {
-        closeJob?.cancel()
+        val pendingClose = closeJob
+        pendingClose?.cancel()
         closeJob = null
-        if (channel != null) return true
-        val ch = Channel<List<LogEntry>>(Channel.UNLIMITED)
+        if (channel != null) {
+            // The close timer can be late (nothing runs while the phone sleeps): the wall clock decides
+            val expired = pendingClose != null && System.currentTimeMillis() - stoppedAtMs > RESUME_WINDOW_MS
+            if (!expired) return true
+            closeNow()
+        }
+        val ch = Channel<Item>(Channel.UNLIMITED)
         channel = ch
         _error.value = null
         scope.launch { record(startMs, ch) }
@@ -89,13 +107,15 @@ class SessionRecorder(context: Context) {
 
     /** Queues a batch for writing. Ignored when no session is running. */
     fun write(batch: List<LogEntry>) {
-        channel?.trySend(batch)
+        channel?.trySend(Item.Entries(batch))
     }
 
-    /** Queues a comment line (must start with "# ") in order with the batches. Ignored when no session is running. */
-    fun writeNote(text: String) {
-        val entry = LogEntry(0L, System.currentTimeMillis(), text, CanMessage.Unknown(text))
-        channel?.trySend(listOf(entry))
+    /**
+     * Queues one already serialized record (see [JsonLines]) in order with the batches.
+     * Ignored when no session is running.
+     */
+    fun writeRecord(json: String) {
+        channel?.trySend(Item.Line(json))
     }
 
     /**
@@ -113,8 +133,10 @@ class SessionRecorder(context: Context) {
             closeNow()
             return
         }
+        stoppedAtMs = System.currentTimeMillis()
         closeJob = scope.launch {
-            delay(RESUME_WINDOW_MS)
+            // Poll the wall clock instead of one long delay(): a delay does not elapse while the phone sleeps
+            while (System.currentTimeMillis() - stoppedAtMs < RESUME_WINDOW_MS) delay(CLOSE_POLL_MS)
             synchronized(this@SessionRecorder) {
                 // Ignore a close that was cancelled by start() while waiting for the lock
                 if (closeJob === coroutineContext[Job]) closeNow()
@@ -130,13 +152,13 @@ class SessionRecorder(context: Context) {
         _info.value = null
     }
 
-    private suspend fun record(startMs: Long, ch: Channel<List<LogEntry>>) {
+    private suspend fun record(startMs: Long, ch: Channel<Item>) {
         var writer: BufferedWriter? = null
         try {
             val resolver = appContext.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName(startMs))
-                put(MediaStore.MediaColumns.MIME_TYPE, "text/csv")
+                put(MediaStore.MediaColumns.MIME_TYPE, MIME_TYPE)
                 put(MediaStore.MediaColumns.RELATIVE_PATH, Recordings.RELATIVE_PATH)
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -147,16 +169,22 @@ class SessionRecorder(context: Context) {
                 ?: throw IOException("Cannot open the file")
 
             writer = BufferedWriter(OutputStreamWriter(stream, Charsets.UTF_8))
-            writer.write(CSV_HEADER)
+            writeLine(writer, metaRecord(startMs))
             writer.flush()
 
             var rows = 0L
             publish(ch, Info(name, rows))
-            for (batch in ch) {
-                for (entry in batch) rows += writeEntry(writer, entry)
+            for (item in ch) {
+                when (item) {
+                    is Item.Entries -> for (entry in item.batch) rows += writeEntry(writer, entry)
+                    is Item.Line -> writeLine(writer, item.json)
+                }
                 writer.flush()
                 publish(ch, Info(name, rows))
             }
+            // The queue was closed normally: mark the file as complete
+            writeLine(writer, JsonLines.record("end", "phone_time_ms" to System.currentTimeMillis(), "frame_count" to rows))
+            writer.flush()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -171,13 +199,13 @@ class SessionRecorder(context: Context) {
     }
 
     /** Publishes [info] only if [ch] is still the current session. */
-    private fun publish(ch: Channel<List<LogEntry>>, info: Info) {
+    private fun publish(ch: Channel<Item>, info: Info) {
         synchronized(this) {
             if (channel === ch) _info.value = info
         }
     }
 
-    private fun fail(ch: Channel<List<LogEntry>>, e: Exception) {
+    private fun fail(ch: Channel<Item>, e: Exception) {
         synchronized(this) {
             if (channel === ch) {
                 channel = null
@@ -193,7 +221,7 @@ class SessionRecorder(context: Context) {
 
     private fun fileName(startMs: Long): String {
         val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss").withZone(ZoneId.systemDefault())
-        return "ebike_can_${formatter.format(Instant.ofEpochMilli(startMs))}.csv"
+        return "ebike_can_${formatter.format(Instant.ofEpochMilli(startMs))}.jsonl"
     }
 
     private fun displayName(uri: Uri): String? =
@@ -201,29 +229,69 @@ class SessionRecorder(context: Context) {
             .query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
             ?.use { if (it.moveToFirst()) it.getString(0) else null }
 
-    /** Writes one entry and returns the number of CSV data rows written (0 or 1). */
+    /** First line of every file: layout version, start time, phone and app description. */
+    private fun metaRecord(startMs: Long): String = JsonLines.record(
+        "meta",
+        "version" to JsonLines.VERSION,
+        "start_time_ms" to startMs,
+        "phone" to "${Build.MANUFACTURER} ${Build.MODEL}",
+        "android" to Build.VERSION.RELEASE,
+        "android_sdk" to Build.VERSION.SDK_INT,
+        "app_version" to appVersion(),
+    )
+
+    private fun appVersion(): String? = try {
+        appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun writeLine(w: BufferedWriter, json: String) {
+        w.write(json)
+        w.write("\n")
+    }
+
+    /** Writes one entry and returns the number of `frame` records written (0 or 1). */
     private fun writeEntry(w: BufferedWriter, entry: LogEntry): Int = when (val m = entry.message) {
         is CanMessage.Frame -> {
-            w.write(
-                "${entry.timestampMs},${m.seq},${m.tsUs},${m.id.toString(16).uppercase()}," +
-                    "${if (m.extended) 1 else 0},${if (m.rtr) 1 else 0},${m.dlc},"
+            writeLine(
+                w,
+                JsonLines.record(
+                    "frame",
+                    "phone_time_ms" to entry.timestampMs,
+                    "sequence" to m.seq,
+                    "esp_time_us" to m.tsUs,
+                    "can_id" to m.id.toString(16).uppercase(),
+                    "extended" to m.extended,
+                    "remote_request" to m.rtr,
+                    "data_length" to m.dlc,
+                    "data" to hex(m.data),
+                ),
             )
-            for (b in m.data) {
-                val v = b.toInt() and 0xFF
-                w.write(HEX_DIGITS[v shr 4].code)
-                w.write(HEX_DIGITS[v and 0x0F].code)
-            }
-            w.write("\n")
             1
         }
         is CanMessage.Status -> {
-            w.write("# status,${entry.timestampMs},missed=${m.missed},overrun=${m.overrun}\n")
+            writeLine(
+                w,
+                JsonLines.record(
+                    "status",
+                    "phone_time_ms" to entry.timestampMs,
+                    "missed_frames" to m.missed,
+                    "overrun_frames" to m.overrun,
+                ),
+            )
             0
         }
-        is CanMessage.Unknown -> {
-            // Diagnostic comment lines ("# link", "# event", "# info") are queued as Unknown entries
-            if (m.raw.startsWith("# ")) w.write(m.raw + "\n")
-            0
+        // Lines the app could not decode are only kept in the on-screen log
+        is CanMessage.Unknown -> 0
+    }
+
+    private fun hex(data: ByteArray): String {
+        val sb = StringBuilder(data.size * 2)
+        for (b in data) {
+            val v = b.toInt() and 0xFF
+            sb.append(HEX_DIGITS[v shr 4]).append(HEX_DIGITS[v and 0x0F])
         }
+        return sb.toString()
     }
 }

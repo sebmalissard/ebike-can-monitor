@@ -21,6 +21,7 @@ import androidx.annotation.StringRes
 import com.seb.ebikecanmonitor.R
 import com.seb.ebikecanmonitor.can.CanMessage
 import com.seb.ebikecanmonitor.can.CanProtocol
+import com.seb.ebikecanmonitor.record.JsonLines
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,8 +44,8 @@ sealed interface BleEvent {
     data class SessionStart(val timeMs: Long) : BleEvent
     data object SessionEnd : BleEvent
 
-    /** Diagnostic comment line ("# link", "# event", "# info") to write in the recording, in order. */
-    data class Note(val text: String) : BleEvent
+    /** Diagnostic record (`link` or `event` JSON line, see JsonLines), possibly outside any session. */
+    data class Note(val json: String) : BleEvent
 }
 
 /**
@@ -66,7 +67,6 @@ class BleClient(context: Context) {
         const val CONNECT_TIMEOUT_MS = 15_000L
         const val DISCONNECT_TIMEOUT_MS = 3_000L
         const val LINK_TICK_MS = 1_000L
-        const val MAX_PENDING_NOTES = 100
     }
 
     private val appContext = context.applicationContext
@@ -91,8 +91,6 @@ class BleClient(context: Context) {
 
     private val diag = LinkDiagnostics(appContext)
 
-    /** Events that happen outside a session (scan, failed connection): written in the next file. */
-    private val pendingNotes = ArrayList<String>()
     private var scanStartMs = 0L
 
     @Volatile private var gatt: BluetoothGatt? = null
@@ -178,7 +176,7 @@ class BleClient(context: Context) {
             stopScan()
             _state.value = BleState.Disconnected
             _status.value = str(R.string.status_not_found, DEVICE_NAME)
-            note("scan_timeout", "scan_ms=${System.currentTimeMillis() - scanStartMs}")
+            note("scan_timeout", "scan_duration_ms" to System.currentTimeMillis() - scanStartMs)
         }
     }
 
@@ -227,7 +225,11 @@ class BleClient(context: Context) {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             if (!scanning) return
             stopScan()
-            note("scan_result", "rssi=${result.rssi}", "scan_ms=${System.currentTimeMillis() - scanStartMs}")
+            note(
+                "scan_result",
+                "rssi_dbm" to result.rssi,
+                "scan_duration_ms" to System.currentTimeMillis() - scanStartMs,
+            )
             val device: BluetoothDevice = result.device
             _state.value = BleState.Connecting
             _status.value = str(R.string.status_connecting, device.name ?: device.address)
@@ -239,7 +241,7 @@ class BleClient(context: Context) {
             stopScan()
             _state.value = BleState.Disconnected
             _status.value = str(R.string.status_scan_failed, errorCode)
-            note("scan_failed", "error=$errorCode")
+            note("scan_failed", "error_code" to errorCode)
         }
     }
 
@@ -259,11 +261,11 @@ class BleClient(context: Context) {
                 mainHandler.removeCallbacks(forceClose)
                 note(
                     "disconnect",
-                    "status=$status",
-                    "status_name=${LinkDiagnostics.gattStatusName(status)}",
-                    "new_state=$newState",
-                    "user_requested=${if (userRequestedDisconnect) 1 else 0}",
-                    "in_session=${if (sessionActive.get()) 1 else 0}",
+                    "status_code" to status,
+                    "status_name" to LinkDiagnostics.gattStatusName(status),
+                    "new_state" to newState,
+                    "user_requested" to userRequestedDisconnect,
+                    "in_session" to sessionActive.get(),
                     *diag.summaryFields(),
                 )
                 g.close()
@@ -280,7 +282,7 @@ class BleClient(context: Context) {
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             diag.onMtu(mtu)
-            note("mtu", "mtu=$mtu", "status=$status")
+            note("mtu", "mtu" to mtu, "status_code" to status)
             _status.value = str(R.string.status_discovering_services)
             g.discoverServices()
         }
@@ -320,13 +322,13 @@ class BleClient(context: Context) {
         override fun onPhyRead(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) return
             diag.onPhy(txPhy, rxPhy)
-            note("phy", "tx=$txPhy", "rx=$rxPhy")
+            note("phy", "tx_phy" to LinkDiagnostics.phyName(txPhy), "rx_phy" to LinkDiagnostics.phyName(rxPhy))
         }
 
         override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) return
             diag.onPhy(txPhy, rxPhy)
-            note("phy", "tx=$txPhy", "rx=$rxPhy")
+            note("phy", "tx_phy" to LinkDiagnostics.phyName(txPhy), "rx_phy" to LinkDiagnostics.phyName(rxPhy))
         }
 
         override fun onCharacteristicChanged(
@@ -342,23 +344,12 @@ class BleClient(context: Context) {
 
     // ------------------------------------------------------------ Diagnostics
 
-    /** Builds a "# event" comment line and sends it to the recording, or keeps it for the next file. */
-    private fun note(name: String, vararg fields: String) {
-        val text = buildString {
-            append("# event,").append(System.currentTimeMillis()).append(',').append(name)
-            for (field in fields) append(',').append(field)
-        }
-        if (sessionActive.get()) {
-            events.trySend(BleEvent.Note(text))
-        } else {
-            synchronized(pendingNotes) {
-                pendingNotes.add(text)
-                if (pendingNotes.size > MAX_PENDING_NOTES) pendingNotes.removeAt(0)
-            }
-        }
+    /** Builds an `event` record and queues it; the consumer decides which file it belongs to. */
+    private fun note(name: String, vararg fields: Pair<String, Any?>) {
+        events.trySend(BleEvent.Note(JsonLines.event(System.currentTimeMillis(), name, *fields)))
     }
 
-    /** Once per second while a session is active: asks for a new RSSI and writes a "# link" line. */
+    /** Once per second while a session is active: asks for a new RSSI and writes a `link` record. */
     private val linkTick = object : Runnable {
         override fun run() {
             if (!sessionActive.get()) return
@@ -367,7 +358,7 @@ class BleClient(context: Context) {
             } catch (_: RuntimeException) {
                 // The link is going down: the disconnection event will say why
             }
-            events.trySend(BleEvent.Note(diag.linkLine(System.currentTimeMillis())))
+            events.trySend(BleEvent.Note(diag.linkRecord(System.currentTimeMillis())))
             mainHandler.postDelayed(this, LINK_TICK_MS)
         }
     }
@@ -377,11 +368,6 @@ class BleClient(context: Context) {
         if (sessionActive.compareAndSet(false, true)) {
             events.trySend(BleEvent.SessionStart(System.currentTimeMillis()))
             diag.resetCounters()
-            events.trySend(BleEvent.Note(diag.infoLine(System.currentTimeMillis())))
-            synchronized(pendingNotes) {
-                for (text in pendingNotes) events.trySend(BleEvent.Note(text))
-                pendingNotes.clear()
-            }
             mainHandler.postDelayed(linkTick, LINK_TICK_MS)
         }
     }

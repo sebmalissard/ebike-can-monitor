@@ -661,15 +661,28 @@ private fun RecordingViewer(
     }
 }
 
+/** A JSON Lines record: type, optional time field (phone_time_ms or start_time_ms), other fields. */
+private val JSON_RECORD = Regex("""^\{"type":"(\w+)",?(?:"(?:phone_time_ms|start_time_ms)":(\d+),?)?(.*)\}$""")
+
 /**
- * One CSV row of a session file, rendered like a live log line: the leading `phone_time_ms`
- * column becomes a colored HH:mm:ss.SSS time. Header and comment lines are shown as they are.
+ * One line of a session file, rendered like a live log line: the time of the record becomes a
+ * colored HH:mm:ss.SSS time, followed by the record type and its fields. Rows of older CSV files
+ * (leading `phone_time_ms` column) are shown the same way; anything else is shown as it is.
  */
 @Composable
 private fun FileLogLine(line: String, timeFormatter: DateTimeFormatter) {
     val timeColor = MaterialTheme.colorScheme.primary
-    val comma = line.indexOf(',')
-    val timeMs = if (comma > 0) line.substring(0, comma).toLongOrNull() else null
+    val record = JSON_RECORD.matchEntire(line)
+    val timeMs: Long?
+    val body: String
+    if (record != null) {
+        timeMs = record.groupValues[2].toLongOrNull()
+        body = "${record.groupValues[1]}  ${record.groupValues[3]}"
+    } else {
+        val comma = line.indexOf(',')
+        timeMs = if (comma > 0) line.substring(0, comma).toLongOrNull() else null
+        body = if (timeMs != null) line.substring(comma + 1) else line
+    }
 
     Text(
         text = buildAnnotatedString {
@@ -678,10 +691,8 @@ private fun FileLogLine(line: String, timeFormatter: DateTimeFormatter) {
                     append(timeFormatter.format(Instant.ofEpochMilli(timeMs)))
                 }
                 append("  ")
-                append(line.substring(comma + 1))
-            } else {
-                append(line)
             }
+            append(body)
         },
         fontFamily = FontFamily.Monospace,
         fontSize = 12.sp,

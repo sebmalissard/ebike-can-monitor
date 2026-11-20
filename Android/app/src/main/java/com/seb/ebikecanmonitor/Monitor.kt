@@ -9,6 +9,7 @@ import com.seb.ebikecanmonitor.ble.BleState
 import com.seb.ebikecanmonitor.ble.LogEntry
 import com.seb.ebikecanmonitor.can.CanMessage
 import com.seb.ebikecanmonitor.companion.CompanionPairing
+import com.seb.ebikecanmonitor.record.JsonLines
 import com.seb.ebikecanmonitor.record.SessionRecorder
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
@@ -71,6 +72,10 @@ class Monitor private constructor(context: Context) {
     private var recordedSeq = NO_SEQ
     private var recordedTsUs = 0L
     private var checkSeqGap = false
+
+    /** Diagnostic records received while no file is open: written at the start of the next file. */
+    private val pendingRecords = ArrayList<String>()
+    private val maxPendingRecords = 100
 
     /** Frames lost between the ESP32 and the app (`seq` gaps, e.g. saturated BLE buffer). */
     private val _lostFrames = MutableStateFlow(0L)
@@ -193,23 +198,31 @@ class Monitor private constructor(context: Context) {
     }
 
     /**
-     * After a resumed recording (link lost then recovered, same file), marks in the CSV whether
+     * After a resumed recording (link lost then recovered, same file), marks in the recording whether
      * frames were lost during the disconnection. Written just before the first frame that follows.
      */
     private fun checkRecordedGap(timeMs: Long, m: CanMessage.Frame) {
         if (checkSeqGap) {
             checkSeqGap = false
             if (recordedSeq != NO_SEQ) {
-                val note = when {
+                val record = when {
                     m.seq > recordedSeq + 1 -> {
                         val lost = m.seq - recordedSeq - 1
                         _lostFrames.update { it + lost }
-                        "seq_gap,from=$recordedSeq,to=${m.seq},lost=$lost,esp_gap_ms=${(m.tsUs - recordedTsUs) / 1000}"
+                        JsonLines.event(
+                            timeMs,
+                            "sequence_gap",
+                            "from_sequence" to recordedSeq,
+                            "to_sequence" to m.seq,
+                            "lost_frames" to lost,
+                            "esp_gap_ms" to (m.tsUs - recordedTsUs) / 1000,
+                        )
                     }
-                    m.seq <= recordedSeq -> "esp_reboot,from=$recordedSeq,to=${m.seq}"
-                    else -> "seq_continuous,seq=${m.seq}"
+                    m.seq <= recordedSeq ->
+                        JsonLines.event(timeMs, "esp_reboot", "from_sequence" to recordedSeq, "to_sequence" to m.seq)
+                    else -> JsonLines.event(timeMs, "sequence_continuous", "sequence" to m.seq)
                 }
-                recorder.writeNote("# event,$timeMs,$note")
+                recorder.writeRecord(record)
             }
         }
         recordedSeq = m.seq
@@ -234,11 +247,13 @@ class Monitor private constructor(context: Context) {
                     manualDisconnect = false
                     if (resumed) {
                         checkSeqGap = true
-                        recorder.writeNote("# event,${event.timeMs},session_resumed,gap_ms=${event.timeMs - lastSessionEndMs}")
+                        recorder.writeRecord(JsonLines.event(event.timeMs, "session_resumed", "gap_ms" to event.timeMs - lastSessionEndMs))
                     } else {
                         checkSeqGap = false
                         recordedSeq = NO_SEQ
                     }
+                    for (json in pendingRecords) recorder.writeRecord(json)
+                    pendingRecords.clear()
                 }
                 BleEvent.SessionEnd -> {
                     publish(batch)
@@ -249,7 +264,12 @@ class Monitor private constructor(context: Context) {
                 is BleEvent.Note -> {
                     publish(batch)
                     batch = ArrayList()
-                    recorder.writeNote(event.text)
+                    if (recorder.isOpen) {
+                        recorder.writeRecord(event.json)
+                    } else {
+                        pendingRecords.add(event.json)
+                        if (pendingRecords.size > maxPendingRecords) pendingRecords.removeAt(0)
+                    }
                 }
             }
             event = client.events.tryReceive().getOrNull()

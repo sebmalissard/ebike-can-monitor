@@ -54,7 +54,7 @@ object Recordings {
     /** Opens the Android share sheet for [recording]. */
     fun share(context: Context, recording: Recording) {
         val send = Intent(Intent.ACTION_SEND).apply {
-            type = "text/csv"
+            type = if (recording.name.endsWith(".csv")) "text/csv" else "text/plain"
             putExtra(Intent.EXTRA_STREAM, recording.uri)
             clipData = ClipData.newRawUri(recording.name, recording.uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
